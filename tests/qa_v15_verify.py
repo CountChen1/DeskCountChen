@@ -375,6 +375,7 @@ def find_blank_viewport_point(pw) -> QPoint | None:
 # --------------------------------------------------------------------------
 
 LAST_OPEN_ACTIVE = False      # 最近一次 open_panel 是否真的让面板拿到了激活
+LAST_PANEL = None             # 最近一次 open_panel 产出的面板（关闭后仍可读 close_reason）
 
 
 def open_panel(app, controller, cat_id: str, settle: float = 0.8):
@@ -390,9 +391,10 @@ def open_panel(app, controller, cat_id: str, settle: float = 0.8):
     因此这里先等产品自己的激活尝试，抢不到再自己抢一次（``force_foreground``），
     结果记进 ``LAST_OPEN_ACTIVE``，由调用方决定"判 FAIL 还是判 SKIP"。
     """
-    global LAST_OPEN_ACTIVE
+    global LAST_OPEN_ACTIVE, LAST_PANEL
     controller.open_panel(cat_id)
     pw = controller.panel
+    LAST_PANEL = pw
     LAST_OPEN_ACTIVE = False
     if pw is not None:
         pump(app, 0.15)              # 给产品自己的 activateWindow / 抢前台留时间
@@ -447,6 +449,20 @@ def install_deactivate_spy() -> None:
         app.installEventFilter(DEACT_SPY)
 
 
+def closed_by_external_foreground(pw) -> bool:
+    """面板被 ``deactivate`` 关掉，且**当时**前台由别的进程持有。
+
+    这种关闭是**正确行为** —— 确实有别的窗口把前台拿走了（用户切走、或者同机
+    另一个测试进程在跑 Qt 用例），产品照设计关面板。但它让"面板应存活"这类
+    用例的前提不成立，所以应当记 SKIP 而不是 FAIL。
+
+    实测背景：同一台机器上并行跑两个 GUI 测试套件时，B1/B2/B7 会成片报
+    `reason='deactivate'` —— 不是产品退化，是两边互相抢前台。
+    """
+    return (safe_reason(pw) == PW.REASON_DEACTIVATE
+            and foreground_stolen_externally())
+
+
 def require_panel(name: str, pw, needs_active: bool = False) -> bool:
     """前置条件：面板必须存在；``needs_active`` 时还要求它真的拿到过激活。
 
@@ -455,7 +471,10 @@ def require_panel(name: str, pw, needs_active: bool = False) -> bool:
     Esc / 编辑态 / 外点轮询这些不依赖激活的用例不要开，否则白白丢覆盖。
     """
     if pw is None:
-        if not LAST_OPEN_ACTIVE:
+        if closed_by_external_foreground(LAST_PANEL):
+            skip(name, f"环境限制：面板被外部进程(pid={foreground_owner_pid()})夺走"
+                       f"前台后按 deactivate 关闭——这是正确行为，用例前提不成立")
+        elif not LAST_OPEN_ACTIVE:
             skip(name, "环境限制：测试机前台锁定，面板抢不到激活，用例前提不成立")
         else:
             check(name, False, "controller.panel is None（已拿到激活仍被关闭）")
@@ -506,19 +525,25 @@ def b1_edit_mode(app, controller, cat_ids) -> None:
     thread.join(2.0)
     pump(app, 0.25)
 
-    check("B1 长按 400ms 后确实进入编辑态（抖动多选）", in_edit,
-          f"grid.edit_mode={in_edit}")
-    if still_open:
-        check("B1 长按期间面板未被误关", True, "controller.panel=存活")
-    elif safe_reason(pw) == REASON_FOCUS_LOST and foreground_stolen_externally():
-        skip("B1 长按期间面板未被误关",
+    # 先判环境噪音：面板若被**外部进程**抢走前台而关闭，长按自然也没进编辑态，
+    # 那是用例前提不成立，不是产品不会进编辑态 —— 两条都要记 SKIP。
+    env_noise = (not still_open
+                 and foreground_stolen_externally()
+                 and safe_reason(pw) in (REASON_FOCUS_LOST, PW.REASON_DEACTIVATE))
+    if env_noise:
+        skip("B1 长按 400ms 后确实进入编辑态（抖动多选）",
              f"环境限制：按压期间前台被外部进程(pid={foreground_owner_pid()})夺走，"
-             f"focus-lost 触发前提不可控 reason={safe_reason(pw)!r}")
+             f"面板已按 {safe_reason(pw)!r} 关闭，长按无从发生")
+        skip("B1 长按期间面板未被误关",
+             f"同上：按 {safe_reason(pw)!r} 关闭属于正确行为")
         controller.close_panel()
         return
-    else:
-        check("B1 长按期间面板未被误关", False,
-              f"controller.panel=None(误关) reason={safe_reason(pw)!r}")
+
+    check("B1 长按 400ms 后确实进入编辑态（抖动多选）", in_edit,
+          f"grid.edit_mode={in_edit}")
+    check("B1 长按期间面板未被误关", still_open,
+          f"controller.panel={'存活' if still_open else 'None(误关)'}"
+          f" reason={safe_reason(pw)!r}")
     if not still_open:
         controller.close_panel()
         return
@@ -678,7 +703,7 @@ def _drag_once(app, controller, cat_ids, cat_id: str) -> None:
     else:
         check("B2 拖拽循环正常返回（真实 QDrag 走完一次）", bool(finished),
               f"finished={bool(finished)}")
-        env_noise = (reason == REASON_FOCUS_LOST
+        env_noise = (reason in (REASON_FOCUS_LOST, PW.REASON_DEACTIVATE)
                      and foreground_stolen_externally())
         if env_noise:
             skip("B2 拖拽进行中/结束后面板均未被误关",
@@ -967,7 +992,9 @@ def b7_rapid_switch(app, controller, cat_ids) -> None:
     new = controller.panel
     old_visible_immediately = alive_visible(old) if old is not None else None
     # 新面板能不能拿到前台决定后续 3 条判 FAIL 还是 SKIP（见 require_panel 说明）
-    active_ok = new is not None and (is_os_foreground(new) or force_foreground(new))
+    active_ok = (new is not None
+                 and (is_os_foreground(new) or force_foreground(new))
+                 and not closed_by_external_foreground(new))
     pump(app, 1.0)
     check("B7 旧面板与新面板不是同一个对象", old is not None and new is not None and old is not new,
           f"old={type(old).__name__ if old else None} new={type(new).__name__ if new else None}")

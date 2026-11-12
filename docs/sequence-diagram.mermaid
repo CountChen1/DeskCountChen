@@ -1,0 +1,114 @@
+%% DesktopBox 关键流程时序图 —— v1.2（与 docs/design.md §10 一致）
+%% v1.0 的悬浮窗 / 看门狗流程已整体删除。
+
+%% ============ 10.5.1 启动流程 ============
+sequenceDiagram
+    autonumber
+    participant M as main.py
+    participant WO as window_ops
+    participant SI as single_instance
+    participant AC as AppController
+    participant CFG as AppConfig
+    participant DS as DesktopShortcutManager
+    participant SL as shell_link
+    participant TR as QSystemTrayIcon
+
+    M->>M: init logging / faulthandler / SetAppUserModelID
+    M->>M: parse --open / --selfcheck
+    alt --selfcheck
+        M->>M: 打印"基础设施就绪"后退出(0)   # 在拿互斥量之前
+    end
+    M->>M: QApplication + setStartDragDistance(4px)
+    M->>M: cursor = QCursor.pos()   # 必须在任何阻塞前取
+    M->>WO: acquire_single_instance_mutex()
+    alt 互斥量已被持有（第二实例）
+        WO-->>M: False
+        alt 带 --open
+            M->>SI: send_open_request(dir, cursor.x(), cursor.y())
+            M->>M: 无论成败都 return 0（静默，不弹框）
+        else 无参数
+            M->>M: return 0（静默）
+        end
+    else 首个实例
+        WO-->>M: True
+        M->>AC: AppController(app)
+        AC->>CFG: AppConfig.load(config_path)
+        CFG-->>AC: AppConfig（旧 x/y/watchdog_ms 静默忽略）
+        AC->>AC: _ensure_categories()   # 未登记目录自动登记；空则建"常用"
+        AC->>AC: IconCache()
+        AC->>DS: DesktopShortcutManager(icon_cache, ico_dir, state_path, project_root)
+        AC->>TR: _setup_tray()（每分类子菜单 + 新建/打开数据目录/退出）
+        AC->>AC: _sync_shortcuts()
+        AC->>DS: sync(categories)
+        DS->>SL: desktop_dir()  # SHGetKnownFolderPath(FOLDERID_Desktop)
+        loop 每个分类
+            alt visible == False
+                DS->>DS: 删除桌面 .lnk
+            else 指纹未变且文件存在
+                DS->>DS: 跳过重写（避免桌面图标重排）
+            else 新建 / 改名 / 换图标
+                DS->>DS: ensure_ico()（多尺寸 PNG 容器）
+                DS->>SL: create_shortcut(dest, pythonw, "main.py --open dir", ...)
+                DS->>DS: 更新 lnk_state.json 指纹
+            end
+        end
+        DS->>DS: _prune_orphan_icons(alive, removed_ids, managed_before)
+        Note over DS: 三道闸：alive 空 → 不动手；removed_ids 空 → 早退；<br/>注销占比 ≥ max(2, ceil(managed_before/2)) → 熔断（只保护 .ico，.lnk 照删）
+        AC->>SI: SingleInstanceServer().start()  # DesktopBox.single.v1
+        SI-->>AC: open_requested 信号已连接 open_panel_for_dir
+        AC-->>M: start() 返回
+        M->>M: if open_dir: open_panel_for_dir(...)  # .lnk 拉起的首实例
+        M->>M: app.exec() → 退出时 server.stop() + controller.shutdown()
+    end
+
+%% ============ 10.5.2 双击桌面快捷方式 → 唤醒已有实例 ============
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant SH as Windows 资源管理器
+    participant P2 as 第二实例
+    participant P1 as 第一实例(SingleInstanceServer)
+    participant AC as AppController
+    participant PW as PanelWindow
+
+    U->>SH: 双击 <桌面>\常用.lnk
+    SH->>P2: pythonw.exe main.py --open "常用"
+    P2->>P2: 互斥量已被持有 → cursor = QCursor.pos()
+    P2->>P1: QLocalSocket 连接 DesktopBox.single.v1
+    P2->>P1: {"action":"open","dir":"常用","x":..,"y":..}\n
+    Note over P2,P1: 写完必须先 flush + 跑局部事件循环<br/>（立刻析构套接字会丢包）
+    P1->>P1: _on_ready_read → decode_request
+    P1->>AC: open_requested(dir, x, y)
+    AC->>AC: find_by_dir(dir) → open_panel(cat_id, anchor=QPoint(x,y))
+    AC->>PW: place_near(anchor) 或 place_center()
+    PW-->>U: 面板出现在双击位置附近
+    P1->>P2: 断开
+    P2->>P2: 退出(0)，全程无对话框
+    Note over P1: 套接字只 close + 保留强引用，<br/>绝不 deleteLater（否则进程会崩）
+
+%% ============ 10.5.3 面板内拖拽（插入语义） ============
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant PG as PanelGrid
+    participant SO as slot_ops
+    participant PM as PanelModel
+    participant AC as AppController
+    participant FM as FolderModel
+
+    U->>PG: 编辑态下按住条目拖动 > 4px
+    PG->>PG: dropEvent → 计算 (rows, target)
+    PG->>PM: serialize_slots() → slots（含 None 空格）
+    PG->>SO: apply_move(slots, rows, target)
+    Note over SO: 在原始行号空间运算：<br/>被搬的行置 None（不删元素）<br/>→ 无需行号转换，且结构上不可能向前补位
+    SO-->>PG: new_slots
+    alt new_slots == slots
+        PG->>PG: 直接返回（拖到自己 / 越界且已在尾部）
+    else 有变化
+        PG->>PM: build_slots(new_slots, entries, icon_cache, item_px)
+        PG->>AC: order_changed()
+        AC->>AC: 200ms 去抖
+        AC->>PM: serialize_slots()
+        AC->>FM: save_slots(slots)
+        FM->>FM: 原子写 .order.json（tmp → fsync → os.replace）+ 设隐藏属性
+    end

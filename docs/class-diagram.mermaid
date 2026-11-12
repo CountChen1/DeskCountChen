@@ -1,0 +1,265 @@
+%% DesktopBox 类图 —— v1.2（真实桌面快捷方式方案）
+%% 与 docs/design.md §10 一致。v1.0 的 CategoryIconWindow / 看门狗已整体删除。
+classDiagram
+    direction LR
+
+    class AppController {
+        +AppConfig cfg
+        +IconCache icon_cache
+        +DesktopShortcutManager shortcuts
+        +QSystemTrayIcon tray
+        +PanelWindow panel
+        +str active_cat_id
+        +start()
+        +shutdown()
+        +open_panel(cat_id, anchor)
+        +open_panel_for_dir(dir_name, x, y)
+        +close_panel()
+        +refresh_category(cat_id)
+        +apply_settings(cat_id)
+        +_sync_shortcuts()
+        +_rebuild_tray_menu()
+        +_dispatch_tray(action, cat_id)
+        +_after_categories_changed()
+    }
+
+    class AppConfig {
+        +Settings app
+        +List~CategoryConfig~ categories
+        +Path config_path
+        +load(path) AppConfig
+        +save() None
+        +find(cat_id) CategoryConfig
+        +find_by_dir(dir) CategoryConfig
+        +add_category(dir_name, label, icon_px) CategoryConfig
+        +remove_category(cat_id) None
+    }
+
+    class Settings {
+        +int icon_px_default
+        +int panel_item_px
+        +int drag_threshold_px
+        +int edit_press_ms
+        +int watch_poll_ms
+        +from_dict(d) Settings
+        +to_dict() dict
+    }
+
+    class CategoryConfig {
+        +str id
+        +str dir
+        +str label
+        +str image
+        +int icon_px
+        +bool visible
+        +int panel_w
+        +int panel_h
+        +int radius
+        +str bg_color
+        +int opacity
+        +str position_mode
+        +dir_path(root) Path
+        +sanitize() None
+        +from_dict(d) CategoryConfig
+        +to_dict() dict
+    }
+
+    class DesktopShortcutManager {
+        +IconCache icon_cache
+        +Path ico_dir
+        +Path state_path
+        +Path desktop_dir
+        +Path project_root
+        +sync(categories) None
+        +ensure_ico(cat, record) tuple
+        +remove_all(categories) None
+        -_resolve_desktop() Path
+        -_signature(cat, name, ico) str
+        -_write_lnk(dest, cat, ico) bool
+        -_delete_lnk(desktop, name) None
+        -_prune_orphan_icons(alive, removed_ids, managed_before) None
+        -_load_state() dict
+        -_save_state(state) None
+    }
+
+    class SingleInstanceServer {
+        +str server_name
+        +open_requested
+        +start() bool
+        +stop() None
+        -_on_new_connection() None
+        -_on_ready_read(sock) None
+        -_on_disconnected(sock) None
+        -_retire(sock) None
+    }
+
+    class FolderModel {
+        +Path dir
+        +List~str~ order_names
+        +List~Entry~ entries
+        +changed
+        +reload() List~Entry~
+        +save_slots(slots) None
+        +start_watch() None
+        +stop_watch() None
+        -_merge(entries, slots) List~Entry~
+    }
+
+    class Entry {
+        +str name
+        +Path path
+        +str kind
+        +str norm
+    }
+
+    class OrderStore {
+        +Path order_path
+        +load() List~str~
+        +load_slots() List
+        +save_slots(slots) None
+        +save(visible_names, old_order) None
+    }
+
+    class IconCache {
+        +QFileIconProvider provider
+        +cache
+        +pixmap(path, px) QPixmap
+        +category_pixmap(cat, px) QPixmap
+        +default_icon(px) QPixmap
+        +invalidate_dir(dir) None
+    }
+
+    class PanelModel {
+        +QStandardItemModel model
+        +List~Entry~ entries
+        +build(entries, icon_cache, item_px) None
+        +build_slots(slots, entries, icon_cache, item_px) None
+        +rebuild(entries, icon_cache, item_px, keep_names) None
+        +serialize() List~str~
+        +serialize_slots() List
+        +entry_at(row) Entry
+        +entry_by_name(name) Entry
+    }
+
+    class PanelWindow {
+        +CategoryConfig cat
+        +PanelGrid grid
+        +closed
+        +open_folder_requested
+        +resized
+        +set_model(panel_model) None
+        +place_near(icon_rect) None
+        +place_center(icon_rect) None
+        +paintEvent(e)
+        +event(e)
+        +changeEvent(e)
+        +keyPressEvent(e)
+        +mousePressEvent(e)
+        +mouseMoveEvent(e)
+        +mouseReleaseEvent(e)
+    }
+
+    class PanelGrid {
+        +PanelModel panel_model
+        +float phase
+        +bool edit_mode
+        +order_changed
+        +launch_requested
+        +enter_edit_mode() None
+        +exit_edit_mode() None
+        +dropEvent(e)
+        +eventFilter(obj, ev) bool
+        -_apply_slot_move(rows, target) None
+        -_emit_order() None
+    }
+
+    class JiggleDelegate {
+        +float phase
+        +bool edit_mode
+        +paint(painter, option, index)
+    }
+
+    class SettingsDialog {
+        +CategoryConfig cat
+        +settings_applied
+        +category_renamed
+        +open_folder_requested
+        +image_source() str
+        +image_cleared() bool
+        +exec_() int
+        -_build_ui() None
+        -_on_accept() None
+    }
+
+    class slot_ops {
+        <<module>>
+        +apply_move(slots, rows, target) List
+        +last_occupied(slots) int
+    }
+
+    class desktop_shortcuts {
+        <<module>>
+        +ICO_PX
+        +ICO_SIZES
+        +sanitize_stem(label) str
+        +plan_lnk_names(categories) dict
+        +validate_ico(path) bool
+        +_write_ico(dest, pixmap) bool
+        +_write_ico_multi(dest, pixmap, sizes) bool
+    }
+
+    class shell_link {
+        <<module>>
+        +desktop_dir() Path
+        +create_shortcut(dest, target, arguments, working_dir, icon_path, description) bool
+    }
+
+    class window_ops {
+        <<module>>
+        +set_file_hidden(path) None
+        +clear_file_hidden(path) None
+        +logical_name_cmp(a, b) int
+        +shell_open(path) bool
+        +acquire_single_instance_mutex() bool
+        +release_single_instance_mutex() None
+        +set_app_user_model_id(name) None
+    }
+
+    class single_instance {
+        <<module>>
+        +encode_request(dir_name, x, y) bytes
+        +decode_request(raw) dict
+        +send_open_request(dir_name, x, y) bool
+    }
+
+    class menus {
+        <<module>>
+        +build_tray_menu(parent, dispatch, categories) QMenu
+        +build_category_menu(parent, dispatch, cat_id, label, visible) QMenu
+    }
+
+    AppController *-- AppConfig : 拥有
+    AppController *-- IconCache : 拥有
+    AppController *-- DesktopShortcutManager : 拥有
+    AppController "1" o-- "0..1" PanelWindow : 同时仅一个
+    AppController ..> SettingsDialog : 打开
+    AppController ..> menus : 构建托盘菜单
+    AppController ..> window_ops : 调用
+    AppConfig *-- Settings : 组合
+    AppConfig *-- "1..*" CategoryConfig : 组合
+    DesktopShortcutManager ..> shell_link : 写 .lnk
+    DesktopShortcutManager ..> desktop_shortcuts : 命名 / ICO
+    DesktopShortcutManager ..> CategoryConfig : 只读
+    DesktopShortcutManager ..> IconCache : 取图
+    SingleInstanceServer ..> single_instance : 协议编解码
+    AppController ..> SingleInstanceServer : 持有并连接信号
+    PanelWindow *-- PanelGrid : 组合
+    PanelWindow --> CategoryConfig : 只读
+    PanelGrid *-- PanelModel : 组合
+    PanelGrid *-- JiggleDelegate : 组合
+    PanelGrid ..> slot_ops : 插入语义
+    PanelModel --> Entry : 包装
+    PanelModel ..> IconCache : 取图
+    FolderModel *-- OrderStore : 组合
+    FolderModel ..> Entry : 产出
+    FolderModel ..> window_ops : 自然排序

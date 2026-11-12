@@ -176,7 +176,8 @@ class PanelWindow(QWidget):
         self._fade_pending: bool = False    # prepare_show 之后、animate_show 之前
         self._closing: bool = False
         # show() 的单调时钟戳（秒）。用于 deactivate 路径的开场宽限：
-        # 0.0 表示"从未 show 过"，此时宽限判定必然早已过期，不会误推迟关闭。
+        # 0.0 表示"从未 show 过"，此时宽限判定必然早已过期 → 直接走原有判死逻辑，
+        # 与 v1.4 行为一致（这条宽限只会**少关**，不会多关）。
         self._shown_at: float = 0.0
         self._last_blur_ms: float = 0.0
         self._final_geom = QRect()

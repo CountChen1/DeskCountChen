@@ -1,4 +1,4 @@
-"""开场宽限单测：deactivate 路径也必须享受 ``GRACE_MS``（QA 的 B3）。
+"""开场宽限单测：deactivate 路径也必须享受开场宽限（QA 的 B3）。
 
 ## 为什么有这个文件
 
@@ -12,9 +12,18 @@ v1.5 的 P0-1 修好了"关不掉"，但宽限期（红线 1）当初只做在
 
 本文件锁死三件事：
 
-1. ``show()`` 之后 ``GRACE_MS`` 内触发失活复核 → 面板**存活**；
-2. 超出 ``GRACE_MS`` 后触发失活复核 → 正常关闭，且原因仍是 ``deactivate``；
-3. 宽限内那次复核会**自动重排**，宽限结束后自己把面板关掉（不需要外部再踢一脚）。
+1. ``show()`` 之后宽限内（``panel_window.SHOW_GRACE_S``，由
+   ``panel_watch.GRACE_MS`` 派生）触发失活复核 → 面板**存活**；
+2. 超出宽限后触发失活复核 → 正常关闭，且原因仍是 ``deactivate``；
+3. 宽限内那次失活**作废**：不重排定时器、也不延迟爆雷，宽限结束后**不得**因为
+   **这一次**失活而关闭。
+
+> 第 3 条曾经写成"宽限内那次复核会自动重排、300ms 后把面板关掉"——那是 **defer**
+> 方案，已被两轮实测否掉（关闭时刻从 190ms 只挪到 ~305ms，缺陷不变：宽限结束时
+> ``activeWindow()`` 依然不是面板，再判必判死）。现在的实现是 **discard**：
+> 宽限内直接 ``return``。改这行注释前请先读
+> ``app/windows/panel_window.py::_check_deactivate`` 的 docstring 和
+> ``tests/qa_probe_b3_fix.py``（那里 ``[defer]`` 组是刻意保留的反面教材）。
 
 ## 测试手法
 
@@ -104,7 +113,7 @@ class GraceConstantTests(unittest.TestCase):
         self.assertEqual(panel_window.SHOW_GRACE_S * 1000.0, panel_watch.GRACE_MS)
 
     def test_shown_at_is_zero_before_show(self) -> None:
-        """未 show 过时 ``_shown_at`` 为 0.0：宽限必然早已过期，不会误推迟关闭。"""
+        """未 show 过时 ``_shown_at`` 为 0.0：宽限必然早已过期 → 走原有判死逻辑。"""
         pw = make_panel()
         try:
             self.assertEqual(pw._shown_at, 0.0)  # noqa: SLF001 - 断言初始状态
@@ -142,7 +151,12 @@ class DeactivateGraceTests(unittest.TestCase):
         return pw, other
 
     def test_deactivate_within_grace_keeps_panel_alive(self) -> None:
-        """show() 之后宽限内触发失活复核 → 面板**不得**关闭（B3 的核心）。"""
+        """show() 之后宽限内触发失活复核 → 面板**不得**关闭（B3 的核心）。
+
+        两段断言：立刻不关，**以及**等过整个宽限期之后仍然不关。
+        只有前者的话，defer 实现（宽限内先不判、到期再判死）也能"通过"——
+        那正是被否掉的写法，所以必须补上后半段。
+        """
         pw, other = self._shown_panel_with_other_active()
         try:
             self.assertFalse(pw.isActiveWindow())      # 前置：确实"失活"了
@@ -153,6 +167,10 @@ class DeactivateGraceTests(unittest.TestCase):
             self.assertEqual(pw.close_reason, "")
             self.assertFalse(pw._closing)              # noqa: SLF001
             self.assertTrue(pw.isVisible())
+
+            pump((GRACE_MS + 250) / 1000.0)            # 等过宽限期
+            self.assertTrue(pw.isVisible(), "宽限结束后被追认关闭了（defer 的典型症状）")
+            self.assertEqual(pw.close_reason, "")
         finally:
             pw.close()
             other.close()

@@ -10,7 +10,7 @@ v1.5 的 P0-1 修好了"关不掉"，但宽限期（红线 1）当初只做在
     面板瞬间失活 → 120ms 后 ``_check_deactivate`` 判死 → 面板一闪而过。
     实测（QA 取证到行）：show() 后 71ms 失活 → 190ms 被关。
 
-本文件锁死三件事：
+本文件锁死五件事：
 
 1. ``show()`` 之后宽限内（``panel_window.SHOW_GRACE_S``，由
    ``panel_watch.GRACE_MS`` 派生）触发失活复核 → 面板**存活**；
@@ -22,6 +22,11 @@ v1.5 的 P0-1 修好了"关不掉"，但宽限期（红线 1）当初只做在
    保证"检查时刻晚于事件时刻"，而 ``show()`` 之后主线程被截屏/淡入/建模压住时，
    复核可能迟到 300ms 以上——用检查时刻判就会把"打开手势的失活"误判成
    "用户走开了"，面板一闪而过。
+5. 没有失活事件时，复核必须**静默**（``_deactivate_at <= 0.0`` 那道早退）。
+   它看起来冗余——删掉之后 ``elapsed`` 变成负数，仍然落进"宽限内 → 作废"
+   同一分支，判定不变——但它区分「从未收到失活」与「收到但被宽限丢弃」，
+   而且是"残留定时器读到被清 0 的戳"唯一的现场痕迹（一个 debug 级日志）。
+   由 ``test_stale_check_after_reshow_is_silent`` 守。
 
 > ⚠️ **反例，勿照做**：第 3 条**曾经**是"宽限内那次复核会自动重排、300ms 后把面板
 > 关掉"（defer 方案），已被两轮实测否掉（关闭时刻从 190ms 只挪到 ~305ms，缺陷
@@ -163,6 +168,44 @@ class GraceConstantTests(unittest.TestCase):
             qt_app().processEvents()
 
             self.assertEqual(pw._deactivate_at, 0.0)       # noqa: SLF001
+        finally:
+            pw.close()
+            pw.deleteLater()
+
+
+    def test_stale_check_after_reshow_is_silent(self) -> None:
+        """没有失活事件时，复核**一行日志都不打** —— 早退行不是冗余。
+
+        守的是 ``_check_deactivate`` 开头那道 ``if self._deactivate_at <= 0.0: return``。
+        它单看像冗余：删掉之后 ``elapsed_ms`` 变成负数，仍然落进"宽限内 → 作废"
+        同一分支，**判定结果不变**，也不会有任何用例变红。但两件事会跟着消失：
+
+        1. 「从未收到过失活」与「收到但被宽限丢弃」不再可分 —— 前者是"场景没发生"，
+           后者是"场景发生了但被丢弃"，日志里必须能分开；
+        2. 残留定时器读到被 ``showEvent`` 清 0 的戳时，会打出一行
+           ``丢弃（-XXXXXms < 300ms）``，即"删了不报错、只在下次改动时才爆"的那个
+           现场痕迹。
+
+        这条痕迹**很弱**，所以必须代码化：只有"上一轮 120ms 内收到失活、随后又
+        ``show()`` 重生"才会触发（产品路径每次都 new ``PanelWindow``，没有残留定时器，
+        永远走不到），而且它是 ``logger.debug``，默认级别看不见。
+
+        手法：不依赖时序、不依赖真实失活 —— 直接摆出"可见、且 ``_deactivate_at == 0.0``"
+        的状态调一次复核。删掉早退行，``assertNoLogs`` 立刻变红。
+
+        背景见 ``docs/design.md`` §12.8.1 ⑦（用例开场的失活与宽限的隐式耦合）：
+        那边说"这条由本用例守住"，这里回指一次 —— 改任一边都会被另一边提醒。
+        """
+        pw = make_panel()
+        try:
+            pw.show()
+            qt_app().processEvents()
+            # 前置一：确实没有失活事件（否则测的就不是早退那条路）
+            self.assertEqual(pw._deactivate_at, 0.0)   # noqa: SLF001
+            # 前置二：必须可见，否则会先命中上面的 isVisible() 早退，用例空过
+            self.assertTrue(pw.isVisible())
+            with self.assertNoLogs("app.windows.panel_window", level="DEBUG"):
+                pw._check_deactivate()                 # noqa: SLF001
         finally:
             pw.close()
             pw.deleteLater()

@@ -154,10 +154,15 @@ class JiggleDelegate(QStyledItemDelegate):
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
 
-        # 1) 背景层（选中底色 / 焦点框）交给样式，图标与文字由我们接管
+        # 1) 背景层（焦点框）交给样式，图标与文字由我们接管。
+        #    单击会让条目带上 State_Selected（部分样式还有 State_Sunken），
+        #    原生样式会用调色板 Highlight 画一整块矩形——深色系统主题下
+        #    就是用户看到的"文件名区域突然变黑"。悬停路径里一律剥掉这两个
+        #    状态：按压/选中的外观与纯悬停完全一致（更亮，绝不出现深色块）。
         bg_opt = QStyleOptionViewItem(opt)
         bg_opt.text = ""
         bg_opt.icon = QIcon()
+        bg_opt.state &= ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_Sunken)
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, bg_opt, painter, widget)
 
         # 2) 图标：以单元格内图标中心为基准放大

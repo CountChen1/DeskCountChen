@@ -417,5 +417,91 @@ class HoverTests(unittest.TestCase):
             pw.deleteLater()
 
 
+def _render_with_state(grid, state_flags) -> QImage:
+    """用受控 option 直接走 delegate.paint（单测用，模拟单击带来的状态位）。"""
+    from PySide6.QtGui import QPainter
+    from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+
+    idx = grid.model().index(0, 0)
+    rect = grid.visualRect(idx)
+    opt = QStyleOptionViewItem()
+    opt.rect = QRect(rect)
+    opt.state = QStyle.StateFlag.State_Enabled | state_flags
+    opt.widget = grid
+    img = QImage(rect.size(), QImage.Format.Format_ARGB32)
+    img.fill(QColor("#F5F6F8"))
+    painter = QPainter(img)
+    grid.delegate.paint(painter, opt, idx)
+    painter.end()
+    return img
+
+
+def _pixel_diff(a: QImage, b: QImage) -> int:
+    n = 0
+    for y in range(min(a.height(), b.height())):
+        for x in range(min(a.width(), b.width())):
+            if a.pixel(x, y) != b.pixel(x, y):
+                n += 1
+    return n
+
+
+class ClickSelectedStateTests(unittest.TestCase):
+    """单击缺陷回归：悬停路径必须剥掉 State_Selected/State_Sunken。
+
+    单击图标时条目进入选中/按压态，原生样式会用调色板 Highlight 画一整块
+    矩形——深色系统主题下就是"文件名区域突然变黑"。断言方式：把调色板
+    Highlight 强制成深色（模拟深色系统主题），带选中/按压态的渲染必须与
+    纯悬停逐像素一致（按压外观 = 悬停外观，绝不出现深色块）。
+    """
+
+    def _make_grid_with_dark_highlight(self):
+        from PySide6.QtGui import QPalette
+
+        qt_app()
+        pw = PanelWindow(make_cat(bg_color="#F5F6F8"), 48, StubIcons())
+        pal = pw.palette()
+        pal.setColor(QPalette.ColorRole.Highlight, QColor("#2B2B2F"))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+        pw.setPalette(pal)
+        model = PanelModel()
+        model.build(make_entries(3), StubIcons(), 48)
+        pw.set_model(model)
+        pw.setGeometry(QRect(50, 50, 320, 240))
+        pw.show()
+        pump(0.1)
+        pw.grid.set_hover_row(0, immediate=True)
+        return pw
+
+    def test_selected_hover_matches_plain_hover(self) -> None:
+        from PySide6.QtWidgets import QStyle
+
+        pw = self._make_grid_with_dark_highlight()
+        try:
+            base = _render_with_state(pw.grid, QStyle.StateFlag.State_MouseOver)
+            sel = _render_with_state(
+                pw.grid, QStyle.StateFlag.State_MouseOver | QStyle.StateFlag.State_Selected)
+            self.assertEqual(_pixel_diff(base, sel), 0,
+                             "选中态悬停渲染必须与纯悬停一致（深色 Highlight 不得漏进来）")
+        finally:
+            pw.close()
+            pw.deleteLater()
+
+    def test_sunken_selected_hover_matches_plain_hover(self) -> None:
+        from PySide6.QtWidgets import QStyle
+
+        pw = self._make_grid_with_dark_highlight()
+        try:
+            base = _render_with_state(pw.grid, QStyle.StateFlag.State_MouseOver)
+            pressed = _render_with_state(
+                pw.grid,
+                QStyle.StateFlag.State_MouseOver | QStyle.StateFlag.State_Selected
+                | QStyle.StateFlag.State_Sunken)
+            self.assertEqual(_pixel_diff(base, pressed), 0,
+                             "按压+选中态悬停渲染必须与纯悬停一致")
+        finally:
+            pw.close()
+            pw.deleteLater()
+
+
 if __name__ == "__main__":
     unittest.main()

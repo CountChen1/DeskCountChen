@@ -76,6 +76,8 @@ except ImportError:                              # v1.4 基线分支
 PROBE_CAT_DIR = "QA关闭探针"
 
 RESULTS: list[tuple[str, bool, str]] = []
+SKIPS: list[tuple[str, str]] = []
+INJECTION_CLEAN = True     # 故障注入这一轮是否真的把面板挡在前台之外
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
@@ -84,6 +86,16 @@ user32.GetForegroundWindow.argtypes = []
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowW.restype = wintypes.HWND
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+user32.AttachThreadInput.restype = wintypes.BOOL
+user32.SwitchToThisWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+user32.BringWindowToTop.argtypes = [wintypes.HWND]
+user32.BringWindowToTop.restype = wintypes.BOOL
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
 user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
 user32.GetCursorPos.restype = wintypes.BOOL
 user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -97,10 +109,21 @@ user32.mouse_event.restype = None
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 
+SW_RESTORE = 9
+
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     RESULTS.append((name, bool(ok), detail))
     print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f"  ({detail})" if detail else ""))
+
+
+def skip(name: str, detail: str = "") -> None:
+    """环境限制导致用例不成立：单列统计，不混进 PASS，也不算 FAIL。"""
+    SKIPS.append((name, detail))
+    print(f"[SKIP] {name}" + (f"  ({detail})" if detail else ""))
 
 
 def info(name: str, detail: str) -> None:
@@ -127,6 +150,52 @@ def panel_hwnd(pw) -> int:
 
 def progman_hwnd() -> int:
     return int(user32.FindWindowW("Progman", None) or 0)
+
+
+def force_foreground_hwnd(hwnd: int, tries: int = 3) -> bool:
+    """把指定窗口抢成**操作系统层面**的前台窗口，返回是否成功。
+
+    ## 为什么要自己抢，而不是直接 ``SetForegroundWindow``
+
+    这台测试机上有别的进程长期持有前台，Windows 前台锁会让裸
+    ``SetForegroundWindow`` 静默失败（返回 False、``GetForegroundWindow()``
+    不变）。探针的两类用例都靠"前台归谁"成立：
+
+    - A/B 要求前台**不是**面板（模拟"系统拒绝激活本进程"）；
+    - C 要求前台**是**面板。
+
+    抢不到就成了环境噪音 —— 实测 `probe_close_bug.py` 4 次里 1 次 4/6，
+    红的正是 A/B/C 这几条。所以这里用业界通用的绕法：``AttachThreadInput``
+    与前台线程共享输入队列，再 ``SetForegroundWindow``，失败再试
+    ``BringWindowToTop`` / ``SwitchToThisWindow``。
+    """
+    if hwnd <= 0 or not user32.IsWindow(wintypes.HWND(hwnd)):
+        return False
+    if foreground_hwnd() == hwnd:
+        return True
+    user32.ShowWindow(wintypes.HWND(hwnd), SW_RESTORE)
+    for _ in range(max(1, tries)):
+        cur = int(kernel32.GetCurrentThreadId())
+        fg = foreground_hwnd()
+        fg_thread = 0
+        if fg:
+            fg_thread = int(user32.GetWindowThreadProcessId(wintypes.HWND(fg), None))
+        attached = False
+        try:
+            if fg_thread and fg_thread != cur:
+                attached = bool(user32.AttachThreadInput(
+                    wintypes.DWORD(cur), wintypes.DWORD(fg_thread), True))
+            user32.BringWindowToTop(wintypes.HWND(hwnd))
+            if not user32.SetForegroundWindow(wintypes.HWND(hwnd)):
+                user32.SwitchToThisWindow(wintypes.HWND(hwnd), True)
+        finally:
+            if attached:
+                user32.AttachThreadInput(
+                    wintypes.DWORD(cur), wintypes.DWORD(fg_thread), False)
+        if foreground_hwnd() == hwnd:
+            return True
+        time.sleep(0.05)
+    return foreground_hwnd() == hwnd
 
 
 def cursor_pos() -> tuple[int, int]:
@@ -198,11 +267,13 @@ def install_foreground_denial() -> tuple:
         # Qt 层不激活（= 系统拒绝 SetForegroundWindow 的真实表现之一）
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         orig_show(self)
-        # 系统层把前台固定给 Progman（桌面），模拟"后台进程抢前台失败"
-        user32.SetForegroundWindow(progman_hwnd())
+        # 系统层把前台固定给 Progman（桌面），模拟"后台进程抢前台失败"。
+        # 用 force_foreground_hwnd 而不是裸 SetForegroundWindow：前台锁会让裸调用
+        # 静默失败，注入就落空了（实测 4 次里 1 次）。
+        force_foreground_hwnd(progman_hwnd())
 
     def _denied_activate(self) -> None:      # noqa: ANN001
-        user32.SetForegroundWindow(progman_hwnd())
+        force_foreground_hwnd(progman_hwnd())
 
     PanelWindow.show = _quiet_show            # type: ignore[method-assign]
     PanelWindow.activateWindow = _denied_activate  # type: ignore[method-assign]
@@ -219,19 +290,67 @@ def uninstall_foreground_denial(orig: tuple) -> None:
 
 
 def open_and_verify_inactive(app, controller, cat_id: str) -> object | None:
-    """故障注入下打开面板，并取证"面板确实处于未激活态"。"""
+    """故障注入下打开面板，并取证"面板确实处于未激活态"。
+
+    ## 为什么要在 settle 期间采样前台归属
+
+    故障注入的本意是"系统全程拒绝本进程拿前台"。但这台机器上偶尔会漏：
+    面板在 show 的瞬间拿到前台 → 宽限期过后被 ``focus-lost`` 收走 →
+    ``controller.panel`` 变 None。此时报"open_panel 没产出面板"是**冤枉产品**，
+    真正失效的是注入。
+
+    所以在 0.6s 的 settle 里逐拍采样 ``GetForegroundWindow()``，记下面板有没有
+    **真的**当过前台；据此决定后面判 FAIL 还是判 SKIP。
+    """
+    global INJECTION_CLEAN
     controller.open_panel(cat_id)
-    pump(app, 0.6)
     pw = controller.panel
     if pw is None:
-        check("故障注入下 open_panel 产出面板", False, "controller.panel is None")
+        check("故障注入下 open_panel 产出面板", False,
+              "controller.open_panel 返回后立即就是 None")
         return None
+
+    hwnd = panel_hwnd(pw)
+    ever_panel_fg = False
+    end = time.monotonic() + 0.6
+    while time.monotonic() < end:
+        app.processEvents()
+        if hwnd and foreground_hwnd() == hwnd:
+            ever_panel_fg = True
+        time.sleep(0.02)
+    INJECTION_CLEAN = not ever_panel_fg
+
+    if controller.panel is None:
+        reason = getattr(pw, "close_reason", "")
+        if ever_panel_fg:
+            skip("故障注入下 open_panel 产出面板",
+                 f"环境限制：注入没兜住 —— 这 0.6s 里面板真的当过前台，"
+                 f"随后被 {reason!r} 关闭；「未激活态」前提不成立")
+        else:
+            check("故障注入下 open_panel 产出面板", False,
+                  f"面板在未激活状态下仍被关闭，reason={reason!r}")
+        return None
+
     hwnd = panel_hwnd(pw)
     fg = foreground_hwnd()
     info("面板 hwnd", hex(hwnd))
     info("GetForegroundWindow", hex(fg))
+    info("是否曾当过前台", f"{ever_panel_fg}（注入{'干净' if INJECTION_CLEAN else '漏了'}）")
     info("isActiveWindow / QApplication.activeWindow",
          f"{pw.isActiveWindow()} / {QApplication.activeWindow()}")
+    if bool(hwnd) and fg == hwnd:
+        # 注入没生效（面板仍被系统当成前台）→ 再抢一次前台给桌面
+        force_foreground_hwnd(progman_hwnd())
+        pump(app, 0.1)
+        fg = foreground_hwnd()
+        info("重试后 GetForegroundWindow", hex(fg))
+    if bool(hwnd) and fg == hwnd:
+        skip("前置条件：GetForegroundWindow() != 面板 hwnd（面板未成为前台窗口）",
+             f"环境限制：抢不到前台给桌面（fg={hex(fg)} == panel={hex(hwnd)}），"
+             f"「未激活态」这个前提不成立，用例不作判定")
+        controller.close_panel()
+        pump(app, 0.3)
+        return None
     check("前置条件：GetForegroundWindow() != 面板 hwnd（面板未成为前台窗口）",
           bool(hwnd) and fg != hwnd, f"fg={hex(fg)} panel={hex(hwnd)}")
     watch = getattr(pw, "_watch", None)
@@ -252,6 +371,10 @@ def case_outside_click_inactive(app, controller, cat_id: str) -> None:
     info("面板几何(逻辑)", f"{geo.x()},{geo.y()} {geo.width()}x{geo.height()}")
     pump(app, 0.5)     # 静置 0.5s：模拟"面板放开后鼠标没有动作"
     still_open = controller.panel is not None
+    if not still_open and not INJECTION_CLEAN:
+        skip("A 前置：静置 0.5s 后面板仍打开",
+             "环境限制：注入没兜住，面板在静置期间就被收走了，用例不成立")
+        return
     check("A 前置：静置 0.5s 后面板仍打开", still_open)
     if not still_open:
         return
@@ -297,8 +420,18 @@ def case_inside_click_inactive(app, controller, cat_id: str) -> None:
         user32.SetCursorPos(saved[0], saved[1])
 
     kept = controller.panel is not None
-    check("B 未激活态点面板内：面板保持打开（不得误关）", kept,
-          f"controller.panel={'仍打开' if kept else 'None(被误关)'}")
+    reason = getattr(pw, "close_reason", "")
+    if kept:
+        check("B 未激活态点面板内：面板保持打开（不得误关）", True,
+              "controller.panel=仍打开")
+    elif not INJECTION_CLEAN:
+        # 注入漏了 → 面板真的当过前台，被 focus-lost 收走是**正确行为**，不能算误关
+        skip("B 未激活态点面板内：面板保持打开（不得误关）",
+             f"环境限制：注入没兜住（面板曾拿到前台），关闭原因是 {reason!r}，"
+             f"不属于「未激活态误关」这一形态")
+    else:
+        check("B 未激活态点面板内：面板保持打开（不得误关）", False,
+              f"controller.panel=None(被误关) reason={reason!r}")
     controller.close_panel()
     pump(app, 0.4)
 
@@ -316,7 +449,15 @@ def case_outside_click_active(app, controller, cat_id: str) -> None:
     fg = foreground_hwnd()
     info("C 前置", f"fg={hex(fg)} panel={hex(hwnd)} isActive={pw.isActiveWindow()}")
     if fg != hwnd:
-        info("C 无法验证", "本环境下面板未能成为前台窗口，跳过（用例 A 已覆盖该形态）")
+        # 正常 show 之后本该是前台；抢不到是这台机器的前台锁在作怪，主动抢一次
+        force_foreground_hwnd(hwnd)
+        pump(app, 0.1)
+        fg = foreground_hwnd()
+        info("C 抢前台后", f"fg={hex(fg)} panel={hex(hwnd)}")
+    if fg != hwnd:
+        skip("C 激活态点面板外：面板关闭（deactivate 路径未回退）",
+             f"环境限制：抢不到前台（fg={hex(fg)} != panel={hex(hwnd)}），"
+             f"deactivate 路径不会触发，用例不作判定")
     else:
         geo = pw.frameGeometry()
         lx, ly = pick_outside_point(geo)
@@ -365,10 +506,18 @@ def _run() -> int:
     app.quit()
 
     failed = [n for n, ok, _ in RESULTS if not ok]
-    print(f"\n共 {len(RESULTS)} 项，通过 {len(RESULTS) - len(failed)} 项")
+    print(f"\n共 {len(RESULTS)} 项，通过 {len(RESULTS) - len(failed)} 项，"
+          f"失败 {len(failed)} 项，环境跳过 {len(SKIPS)} 项")
+    if SKIPS:
+        print("环境跳过（不计入失败，但也不能当成通过）：")
+        for n, why in SKIPS:
+            print(f"  - {n}  ({why})")
     if failed:
         print("失败项：" + ", ".join(failed))
         return 1
+    if SKIPS:
+        print("面板关闭探针：可判定的用例全部通过（有环境跳过）")
+        return 0
     print("面板关闭探针全部通过")
     return 0
 

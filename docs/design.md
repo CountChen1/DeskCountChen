@@ -1509,9 +1509,12 @@ anchor = max{ i | work[i] is not None 且 i ∉ picked }
 这条激活事件路径完全没有宽限。这是 P0-1 的镜像形态：**关不掉修好了，却留下
 "打不开"**。红线 1 的原始动机「打开面板的那一下点击会误关」本来就应该覆盖它。
 
-**修法**：`showEvent` 记 `self._shown_at = time.monotonic()`；`_check_deactivate`
-在 `GRACE_MS` 内**直接作废**（return，不关闭）。`GRACE_MS` 引用
-`panel_watch.GRACE_MS`，不另起常量（有单测 `assertIs` 锁定同一个对象）。
+**修法**：`showEvent` 记 `self._shown_at = time.monotonic()`（每次 show 都重置；
+将来若把面板改成复用对象，忘了重置会让宽限永远"早已过期"，注释里已标红）；
+`_check_deactivate` 在宽限内 `return` **直接丢弃**。宽限用的 `SHOW_GRACE_S`
+由 `panel_watch.GRACE_MS` **派生**（`SHOW_GRACE_S = GRACE_MS / 1000.0`），
+不另写一个 `0.3`——两条关闭路径必须共用一个数字，否则将来一个人改 300、一个人
+改 250 会悄悄漂移（有单测 `assertIs` / 派生关系双重锁定）。
 
 **为什么是"作废"而不是"推迟到宽限结束后再判"（实测教训）**：推迟等于把
 **同一个事件**挪到更晚的时刻重新判一次，而那一刻 `activeWindow()` 早已不是面板

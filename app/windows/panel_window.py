@@ -78,6 +78,11 @@ EDGE = 6          # 边缘拉伸带宽度（px）
 HEADER_H = 36     # 标题拖动区高度
 CLOSE_DELAY_MS = 120
 
+# 开场宽限（秒）：**从 panel_watch.GRACE_MS 派生**，绝不另写一个 0.3。
+# 两条关闭路径（轮询侧 / 激活事件侧）必须共用一个 300ms，否则将来一个人改 300、
+# 一个人改 250 就悄悄漂移，而且只在特定竞态下才表现出来，极难查。
+SHOW_GRACE_S = GRACE_MS / 1000.0
+
 # -- v1.5 外观动画 ---------------------------------------------------------
 SCALE_START = 0.94        # 出现时从 94% 缩放到 100%
 FADE_IN_MS = 140          # 出现动画时长（OutCubic）
@@ -597,17 +602,16 @@ class PanelWindow(QWidget):
         已经被自己关掉）。作废才是对的：这一次失活属于"打开它的那个手势"，
         不是"用户走开了"。用户真的走开时，宽限之后还会有失活/外点，那才该关。
 
-        时间基准 ``_shown_at`` 由 ``showEvent`` 写入；120ms 的 ``CLOSE_DELAY_MS``
-        语义不变（宽限之外的复核与以前完全一致）。
+        时间基准 ``_shown_at`` 由 ``showEvent`` 写入。语义一句话：
+        **宽限内直接丢弃；宽限之后仍走 120ms 复核**（``CLOSE_DELAY_MS`` 未变）。
         """
         from PySide6.QtWidgets import QApplication
 
         if not self.isVisible():
             return
-        elapsed_ms = (time.monotonic() - self._shown_at) * 1000.0
-        if elapsed_ms < GRACE_MS:
-            logger.debug("开场宽限内的失活（%.0fms < %sms）：作废，不关闭面板",
-                         elapsed_ms, GRACE_MS)
+        if time.monotonic() - self._shown_at < SHOW_GRACE_S:
+            logger.debug("开场宽限内的失活：丢弃，不关闭面板（%.0fms < %sms）",
+                         (time.monotonic() - self._shown_at) * 1000.0, GRACE_MS)
             return
         if QApplication.activeWindow() is not self:
             self.close_with_reason(REASON_DEACTIVATE)
@@ -625,7 +629,10 @@ class PanelWindow(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._closing = False
-        # 开场宽限的起点：deactivate 与轮询共用同一个 GRACE_MS 口径
+        # 开场宽限的起点：deactivate 与轮询共用同一个 GRACE_MS/SHOW_GRACE_S 口径。
+        # ⚠️ 必须**每次** show 都重置。现在每次开面板都是新对象，天然满足；
+        # 将来若把 PanelWindow 改成复用对象（缓存+重新 show），忘了重置这里就会
+        # 让宽限永远"早已过期"→ 面板又回到"一闪而过"，而且巨难查。
         self._shown_at = time.monotonic()
         self._recapture_timer.stop()
         if not self._fade_pending:

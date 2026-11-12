@@ -92,6 +92,17 @@ class GraceConstantTests(unittest.TestCase):
         self.assertIs(panel_window.GRACE_MS, panel_watch.GRACE_MS)
         self.assertEqual(GRACE_MS, 300)
 
+    def test_show_grace_seconds_is_derived_not_duplicated(self) -> None:
+        """``SHOW_GRACE_S`` 必须由 ``GRACE_MS`` 派生，不能是另一个字面量 0.3。
+
+        单侧防漂移：将来有人把 GRACE_MS 改成 250，SHOW_GRACE_S 会自动跟着变；
+        如果这里断言失败，说明有人在 panel_window 里又写死了一个 0.3。
+        """
+        from app.windows import panel_window
+
+        self.assertEqual(panel_window.SHOW_GRACE_S, panel_watch.GRACE_MS / 1000.0)
+        self.assertEqual(panel_window.SHOW_GRACE_S * 1000.0, panel_watch.GRACE_MS)
+
     def test_shown_at_is_zero_before_show(self) -> None:
         """未 show 过时 ``_shown_at`` 为 0.0：宽限必然早已过期，不会误推迟关闭。"""
         pw = make_panel()

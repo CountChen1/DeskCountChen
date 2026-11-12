@@ -286,6 +286,7 @@ class DesktopShortcutManager:
         self._auto_desktop: Path | None = None
         self._state: dict[str, dict] = {}
         self._warned_no_desktop = False
+        self._warned_forbidden: set[str] = set()   # v1.5：启动器目录踩线告警去重
 
     # -- 对外入口 -----------------------------------------------------------
 
@@ -569,8 +570,17 @@ class DesktopShortcutManager:
         return {cat_id: launcher_file_name(name) for cat_id, name in base.items()}
 
     def _target_dir(self) -> Path | None:
-        """当前模式对应的落点目录（launcher 模式顺手确保目录存在）。"""
+        """当前模式对应的落点目录（launcher 模式顺手确保目录存在）。
+
+        安全防线（v1.5 追加）：launcher 目录**绝不允许**落在用户数据根上。
+        在返回目录、以及 ``mkdir`` 之前先校验，校验不过直接拒绝写入并只告警
+        一次。理由见 :meth:`_forbidden_launcher_dir`。
+        """
         if self.mode == MODE_LAUNCHER:
+            blocked = self._forbidden_launcher_dir()
+            if blocked:
+                self._warn_forbidden_launcher_dir(blocked)
+                return None
             try:
                 self.launcher_dir.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
@@ -583,10 +593,78 @@ class DesktopShortcutManager:
         return self._resolve_desktop()
 
     def _dir_for_mode(self, mode: str) -> Path | None:
-        """其它模式对应的落点目录（用于"换模式"时清理旧文件）。"""
+        """其它模式对应的落点目录（用于"换模式"时清理旧文件）。
+
+        同样受 :meth:`_forbidden_launcher_dir` 约束：清理会**删文件**，一个错误的
+        launcher_dir 在这里比在写入处更危险，因此这里也要挡（返回 None 时调用方
+        的 ``_delete_own_lnk`` 会直接跳过）。
+        """
         if str(mode) == MODE_LAUNCHER:
+            blocked = self._forbidden_launcher_dir()
+            if blocked:
+                self._warn_forbidden_launcher_dir(blocked)
+                return None
             return self.launcher_dir
         return self._resolve_desktop()
+
+    @staticmethod
+    def _resolve_safely(p: Path) -> Path:
+        """``resolve()`` 的安全版：解析失败（不存在/无权限/环）退回绝对路径。"""
+        try:
+            return Path(p).resolve()
+        except (OSError, RuntimeError):
+            try:
+                return Path(p).absolute()
+            except (OSError, RuntimeError):
+                return Path(p)
+
+    def _forbidden_launcher_dir(self) -> str:
+        """启动器目录是否踩线；返回拒绝原因，空串表示通过。
+
+        为什么要有这道防线：启动器 .lnk 是"给 SAO HUD 图标引用的入口文件"，
+        必须待在 ``%USERPROFILE%\\DesktopBox\\.launchers``。一旦某个调用方把
+        ``launcher_dir`` 传成用户**数据根**（例如 ``E:\\快捷方式SAO``），
+        6 个 ``启动-*.lnk`` 就会直接落在用户自己的分类数据根上，混在用户目录里——
+        这是"动了用户数据"，属于必须无条件拦住的事，跟调用方写没写错无关。
+
+        拒绝条件（按顺序）：
+        1. 命中白名单 ``paths.LAUNCHERS_DIR`` → 放行（正常情况下就是它）；
+        2. 等于 ``paths.DATA_ROOT`` → 拒绝；
+        3. 等于 ``paths.APP_DIR`` → 拒绝（会把 .lnk 撒到程序目录根）；
+        4. 是 ``paths.DATA_ROOT`` 的直属子目录 → 拒绝（那是分类数据目录）。
+
+        注意 ``DATA_ROOT`` 默认等于 ``APP_DIR``（旧配置），此时规则 2/3 同时命中，
+        而规则 1 先放行，所以正常路径不会被误拦。
+        """
+        target = self._resolve_safely(self.launcher_dir)
+        if target == self._resolve_safely(paths.LAUNCHERS_DIR):
+            return ""
+        data_root = self._resolve_safely(paths.DATA_ROOT)
+        if target == data_root:
+            return f"等于分类数据根 {paths.DATA_ROOT}"
+        if target == self._resolve_safely(paths.APP_DIR):
+            return f"等于程序目录 {paths.APP_DIR}"
+        if target.parent == data_root:
+            return f"是分类数据根 {paths.DATA_ROOT} 的直属子目录（分类数据目录）"
+        return ""
+
+    def _warn_forbidden_launcher_dir(self, reason: str) -> None:
+        """拒绝写入的告警——**每个实例每种原因只报一次**，避免每 tick 刷屏。"""
+        if reason in self._warned_forbidden:
+            return
+        self._warned_forbidden.add(reason)
+        logger.warning(
+            "拒绝把启动器写入 %s：%s。启动器目录必须是 %s，"
+            "绝不会落在用户数据根上；本次同步已跳过启动器落点。",
+            self.launcher_dir, reason, paths.LAUNCHERS_DIR,
+        )
+
+    def launcher_dir_blocked_reason(self) -> str:
+        """对外只读查询：启动器目录被拦的原因（空串 = 正常）。
+
+        供自检/诊断脚本使用，避免它们去碰私有实现。
+        """
+        return self._forbidden_launcher_dir()
 
     def _cleanup_legacy_desktop_lnks(self) -> None:
         """迁移清理：收掉历史上写在**真实桌面**的 .lnk（仅 launcher 模式）。

@@ -17,7 +17,7 @@
 
 | 原因 | 触发 | 实现 |
 |---|---|---|
-| ``deactivate`` | 点其他应用/桌面/任务栏（Qt 激活事件） | ``event()`` + ``changeEvent()`` → 120ms 复核 |
+| ``deactivate`` | 点其他应用/桌面/任务栏（Qt 激活事件） | ``event()`` + ``changeEvent()`` → 120ms 复核；``GRACE_MS`` 内的失活**作废** |
 | ``click-outside`` | 面板外左键按下（**不依赖 Qt 激活事件**） | ``OutsideClickWatcher`` 40ms 轮询 |
 | ``focus-lost`` | 曾经是前台，之后持续 ≥180ms 不是 | 同上 |
 | ``esc`` | 键盘 Esc | ``keyPressEvent`` |
@@ -68,7 +68,7 @@ from app.config import MATERIAL_BLUR, CategoryConfig
 from app.panel_model import PanelModel
 from app.win32 import input_watch
 from app.windows.panel_grid import PanelGrid
-from app.windows.panel_watch import OutsideClickWatcher, SystemInputSource
+from app.windows.panel_watch import GRACE_MS, OutsideClickWatcher, SystemInputSource
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +170,9 @@ class PanelWindow(QWidget):
         self._fade: float = 1.0             # 背景 alpha 系数 0..1（禁用窗口透明度）
         self._fade_pending: bool = False    # prepare_show 之后、animate_show 之前
         self._closing: bool = False
+        # show() 的单调时钟戳（秒）。用于 deactivate 路径的开场宽限：
+        # 0.0 表示"从未 show 过"，此时宽限判定必然早已过期，不会误推迟关闭。
+        self._shown_at: float = 0.0
         self._last_blur_ms: float = 0.0
         self._final_geom = QRect()
         self._anim_start_geom = QRect()
@@ -576,9 +579,37 @@ class PanelWindow(QWidget):
             QTimer.singleShot(CLOSE_DELAY_MS, self._check_deactivate)
 
     def _check_deactivate(self) -> None:
+        """复核"是否真的失活了"，确认后关闭面板。
+
+        红线 1（开场宽限）在**激活事件**这一半同样成立：``show()`` 之后
+        ``GRACE_MS`` 内收到的失活一律**作废**——不关闭，也不排到宽限之后再判。
+
+        为什么必须有这一半：用户连点 SAO 图标唤起时，第二次点击往往落在**图标**
+        上——图标在面板之外。那一下会让面板瞬间失活，而 v1.5 之前 ``event()``
+        这条路径没有宽限，面板会"一闪而过"（实测 71ms 失活 → 190ms 被关）。
+        这是 P0-1 的镜像：关不掉修好了，不能留下"打不开"。
+
+        为什么是"作废"而不是"推迟到宽限结束再判"（**实测教训**）：推迟等于把
+        **同一个事件**挪到更晚的时刻重新判一次，而那一刻的 ``activeWindow()``
+        早就不是面板了（激活丢失本来就发生在宽限内），于是必然判死——推迟不但
+        没解决问题，反而把原本无害的早期复核变成了有害的晚期复核。
+        实测评测：改成推迟后 QA 的 B1/B3/B4/B5/B6 一起红（面板开出来 0.8s 后
+        已经被自己关掉）。作废才是对的：这一次失活属于"打开它的那个手势"，
+        不是"用户走开了"。用户真的走开时，宽限之后还会有失活/外点，那才该关。
+
+        时间基准 ``_shown_at`` 由 ``showEvent`` 写入；120ms 的 ``CLOSE_DELAY_MS``
+        语义不变（宽限之外的复核与以前完全一致）。
+        """
         from PySide6.QtWidgets import QApplication
 
-        if self.isVisible() and QApplication.activeWindow() is not self:
+        if not self.isVisible():
+            return
+        elapsed_ms = (time.monotonic() - self._shown_at) * 1000.0
+        if elapsed_ms < GRACE_MS:
+            logger.debug("开场宽限内的失活（%.0fms < %sms）：作废，不关闭面板",
+                         elapsed_ms, GRACE_MS)
+            return
+        if QApplication.activeWindow() is not self:
             self.close_with_reason(REASON_DEACTIVATE)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -594,6 +625,8 @@ class PanelWindow(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._closing = False
+        # 开场宽限的起点：deactivate 与轮询共用同一个 GRACE_MS 口径
+        self._shown_at = time.monotonic()
         self._recapture_timer.stop()
         if not self._fade_pending:
             self._fade = 1.0

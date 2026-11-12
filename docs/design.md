@@ -1476,7 +1476,9 @@ anchor = max{ i | work[i] is not None 且 i ∉ picked }
 **四条安全红线（单测 `tests/test_panel_watch.py` 逐条覆盖）**：
 
 1. **前 300ms 宽限期**（`GRACE_MS`）：面板刚 `show()` 只记录不判死 —— 打开面板
-   的那一下点击、缩放缓入动画期间的鼠标状态都不能算"点外面"；
+   的那一下点击、缩放缓入动画期间的鼠标状态都不能算"点外面"。**两条关闭路径都要
+   遵守**：轮询侧只记录；激活事件侧（`_check_deactivate`）把这段窗口内的失活
+   **直接作废**（详见 12.1.1）；
 2. **面板内部按下绝不触发**：判据是"落点在面板矩形之外"，内部点击/拖拽/长按/
    拖出窗口的 `QDrag`（按下点在面板内）都不会关闭；
 3. **短按防误采**：`GetAsyncKeyState` 低位（"自上次查询以来按过"）对鼠标左键
@@ -1496,6 +1498,34 @@ anchor = max{ i | work[i] is not None 且 i ∉ picked }
 
 **既有行为不变**：`event()` / `changeEvent()` 的 120ms 失焦自关路径原样保留
 （`tests/probe_blur_esc.py` 的 A1–A3/B 用例继续通过）。
+
+### 12.1.1 「打不开」的镜像缺陷与开场宽限（v1.5 复审修复，QA 的 B3）
+
+**现象**：面板 `show()` 后 71ms 发生面板外单击 → `event(WindowDeactivate)` →
+120ms 后 `_check_deactivate` 判死 → 面板在 190ms 被关。用户连点 SAO HUD 图标
+时第二次点击常落在**图标**上（图标在面板之外），面板就"一闪而过"。
+
+**根因**：红线 1 只做在轮询那一半（`OutsideClickWatcher`），`_check_deactivate`
+这条激活事件路径完全没有宽限。这是 P0-1 的镜像形态：**关不掉修好了，却留下
+"打不开"**。红线 1 的原始动机「打开面板的那一下点击会误关」本来就应该覆盖它。
+
+**修法**：`showEvent` 记 `self._shown_at = time.monotonic()`；`_check_deactivate`
+在 `GRACE_MS` 内**直接作废**（return，不关闭）。`GRACE_MS` 引用
+`panel_watch.GRACE_MS`，不另起常量（有单测 `assertIs` 锁定同一个对象）。
+
+**为什么是"作废"而不是"推迟到宽限结束后再判"（实测教训）**：推迟等于把
+**同一个事件**挪到更晚的时刻重新判一次，而那一刻 `activeWindow()` 早已不是面板
+（激活丢失本来就发生在宽限内），于是必然判死 —— 推迟不但没修好，反而把原本
+无害的早期复核变成了有害的晚期复核。实测：改成推迟后 QA 的
+B1/B3/B4/B5/B6 五条一起红（面板开出来 0.8s 后已被自己关掉）。作废之后 22/22 全绿。
+
+语义上这也更对：宽限内的那次失活属于"打开它的那个手势"，不是"用户走开了"。
+用户真的走开时，宽限之后还会有失活或外点（`click-outside` / `focus-lost`），
+那才该关 —— B4 用例（静置 0.9s 后外点必关）继续通过。
+
+**验证**：`tests/test_panel_grace.py`（7 个用例）覆盖「宽限内失活 → 面板存活」、
+「宽限后失活 → 正常关闭且原因仍为 `deactivate`」、「作废后不留 self-schedule
+定时器」；QA 黑盒 `tests/qa_v15_verify.py B` 22/22 通过。
 
 ### 12.2 【P1】毛玻璃背景（Win10 19045 可用）
 
@@ -1579,8 +1609,46 @@ QScreen.grabWindow(0, 面板区域)      # 只抓面板那一小块（整屏 25�
 | 缩放缓入 | 同上 + 探针 | 149–154ms 完成，fade 0→1，几何回到 100% |
 | 悬停 | 单测 + 探针像素对比 | 进度缓动到位；1.08 缩放；渲染差异 52%；常态/悬停文字色不同 |
 | 全局设置 | `tests/test_apply_all.py`（11 项） | 皮肤字段全同步、身份字段不动、立即落盘、开着的面板被关闭 |
-| 全量单测 | `python -m unittest discover -s tests -t .` | **264 tests OK**（v1.4 215 项 + 新增 49 项） |
+| 全量单测 | `python -m unittest discover -s tests -t .` | **288 tests OK**（v1.4 215 项 + v1.5 新增 73 项） |
 
 **新增文件**：`app/win32/input_watch.py`、`app/windows/panel_watch.py`、
 `tests/test_panel_watch.py`、`tests/test_panel_appearance.py`、
-`tests/test_apply_all.py`、`tests/probe_close_bug.py`、`tests/probe_visual_v15.py`。
+`tests/test_apply_all.py`、`tests/test_panel_grace.py`、`tests/test_launcher_guard.py`、
+`tests/probe_close_bug.py`、`tests/probe_visual_v15.py`。
+
+### 12.7 启动器目录安全防线（v1.5 复审修复）
+
+**现象**：用户数据根 `E:\快捷方式SAO` **根下**出现 6 个 `启动-*.lnk`，与
+`%USERPROFILE%\DesktopBox\.launchers\` 里那 6 个 sha256 逐字节相同、mtime 同为
+19:19:57。
+
+**根因调查结论（查不到确证，只能确认不是本仓库代码路径写的）**：
+
+- 全历史 `git grep "launcher_dir=paths.DATA_ROOT|ROOT"` → **零匹配**；`app/paths.py`
+  的 `LAUNCHERS_DIR` 自 v1.4 起一直是 `APP_DIR / ".launchers"`（`git log -S` 只有一个提交）；
+- `set_data_root()` 只改 `DATA_ROOT`，**从不触碰** `LAUNCHERS_DIR`（现有单测断言）；
+- 关键证据：`19:19:57` 的 `app.log` 显示 6 个 .lnk 是写到
+  `C:\Users\Z\DesktopBox\.launchers\` 的（459–464 行），**不是** E 盘；
+- E 盘那 6 个既**同内容**又**同 mtime**，是 `shutil.copy2` / `cp -p` 这类
+  **保留 mtime 的复制**特征；若是程序用 `IShellLinkW` 重新写一遍，mtime 会是写入
+  那一刻。故最可能是迁移期间的一次**手工/一次性复制**。
+
+**加防线（不问原因，无条件拦住）**：`DesktopShortcutManager._forbidden_launcher_dir()`
+在 `_target_dir()` / `_dir_for_mode()` 返回启动器目录前校验，命中即**拒绝写入**并
+`logger.warning`（每个实例每种原因**只报一次**，不刷屏）：
+
+| 拒绝条件 | 理由 |
+|---|---|
+| `resolve()` 后 == `paths.DATA_ROOT` | 启动器会直接落在用户分类数据根上（本次事故形态） |
+| `resolve()` 后 == `paths.APP_DIR` | 会把 .lnk 撒到程序私有目录根 |
+| 是 `paths.DATA_ROOT` 的直属子目录 | 那是分类数据目录，不能塞 .lnk |
+
+白名单：命中 `paths.LAUNCHERS_DIR` 直接放行（`DATA_ROOT` 默认等于 `APP_DIR` 时，
+规则会重叠，靠白名单先判避免误拦）。`_dir_for_mode()` 也挡 —— 它用于**清理**，
+会删文件，比写入处更危险。
+
+**那 6 个文件没有删除**，等用户确认后另行处理。
+
+**验证**：`tests/test_launcher_guard.py`（15 项）覆盖三类拒绝、白名单放行、
+拒绝时不落任何文件、告警只报一次、`data_root/../data` 等价路径也拦得住、
+以及"注销分类不会删掉数据根里的用户文件"。`tools/verify_sao_state.py` 43/43。

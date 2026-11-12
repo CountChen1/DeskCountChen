@@ -279,7 +279,7 @@ def gate_alive(name: str, controller, pw, elapsed_ms: float, hint: str = "") -> 
         return True
     reason = safe_reason(pw) or "（对象已删除，读不到 close_reason）"
     check(name, False,
-          f"面板在 {elapsed_ms:.0f}ms 就被关闭 reason={reason}"
+          f"面板在注入前已不在（检查时刻 {elapsed_ms:.0f}ms）reason={reason}"
           f" caught_by=gate {hint}".rstrip())
     return False
 
@@ -467,7 +467,7 @@ def case_flow(app, controller) -> None:
     ``test_show_resets_deactivate_at`` 守。
 
     本条真正覆盖的是**生命周期**：第二块在静置期被关掉（连坐）时，必须报 **FAIL**，
-    不许落成 SKIP。自证见 ``--mutant-deadobj``（caught_by=gate）。
+    不许落成 SKIP。自证见 ``--mutant-collateral``（caught_by=gate）。
     """
     # 第一轮：宽限内失活（应被作废，面板存活）
     controller.open_panel("c0")
@@ -497,7 +497,8 @@ def case_flow(app, controller) -> None:
     first_alive = controller.panel is not None
     _cleanup(controller, app)
 
-    # 第二轮：宽限之后失活（必须判死）。--mutant-deadobj 在这里注入"连坐"
+    # 第二轮：宽限之后失活（必须判死）。--mutant-collateral 在这里注入"连坐"
+    # （--mutant-deadobj 在同一位置注入的是"wrapper 活、C++ 已死"，走 except 那道）
     controller.open_panel("c0")
     pw2 = controller.panel
     if pw2 is None:
@@ -671,12 +672,103 @@ def install_fault_mode(mode: str) -> None:
 # main
 # --------------------------------------------------------------------------
 
-def _by_label(label: str) -> list[tuple[bool, str]]:
-    return [(ok, d) for n, ok, d in RESULTS if n.startswith(label)]
+MUTANT_ARGS = {
+    "--mutant": "判据退回检查时刻",
+    "--mutant-reset": "showEvent 不再重置 _deactivate_at",
+    "--mutant-collateral": "静置期把第二块 close_panel 掉",
+    "--mutant-deadobj": "静置期只 deleteLater，不动 controller.panel",
+}
+KNOWN_ARGS = tuple(MUTANT_ARGS) + ()
+
+# 每个 mutant 的**预期红集合**（按用例键，不是按完整判词 —— 判词里带实测毫秒数）
+EXPECTED_RED = {
+    "--mutant": {"②", "③", "流程"},
+    "--mutant-reset": {"重置"},
+    "--mutant-collateral": {"流程"},
+    "--mutant-deadobj": {"流程"},
+}
+# 这几组的红还必须**指名是哪道防线接住的**
+EXPECTED_CAUGHT_BY = {
+    "--mutant-collateral": "caught_by=gate",
+    "--mutant-deadobj": "caught_by=except",
+}
+
+
+def case_key(name: str) -> str:
+    """把一条判词映射回用例键（①/②/③/④/流程/重置）。
+
+    判词里带实测毫秒数（"③  失活@281ms（宽限内）…"），所以不能按完整字符串比。
+    """
+    for prefix, key in (("① ", "①"), ("② ", "②"), ("③ ", "③"), ("④ ", "④"),
+                        ("流程(连坐)", "流程"), ("重置(复用)", "重置")):
+        if name.startswith(prefix):
+            return key
+    return name
+
+
+def reject_unknown_args(argv: list[str]) -> bool:
+    """参数是契约：出现不认识的就拒绝，**绝不允许静默跑成正常模式**。
+
+    ## 为什么这条必须有
+
+    实测过：`--mutant-deadobj-except`（一个已经不存在的模式）被静默忽略 →
+    走正常模式 → 6/6 全绿 → **exit 0**。它不报错、不 SKIP、不崩，就是绿。
+    拼错一个字母（`--mutent`、`--mutant-deadobg`）在 CI 里会拿到一份"通过"的报告 ——
+    比红更危险，因为它不会有人去看。§12.8 那条"没有汇总行就判 FAIL"也拦不住它：
+    这个场景有汇总行、内容还全绿。
+    """
+    unknown = [a for a in argv if a not in KNOWN_ARGS]
+    if unknown:
+        print(f"[FATAL] 未知参数: {' '.join(unknown)}")
+        print("[FATAL] 已知参数:")
+        for name, desc in MUTANT_ARGS.items():
+            print(f"          {name:<22} {desc}")
+        print("        （不带任何参数 = 正常模式）")
+        print("[FATAL] 拒绝执行：参数拼错时静默跑正常模式会产出一份假的 6/6 全绿。")
+        return False
+    chosen = [a for a in argv if a in MUTANT_ARGS]
+    if len(chosen) > 1:
+        print(f"[FATAL] 一次只能跑一个 mutant，收到: {' '.join(chosen)}")
+        return False
+    return True
+
+
+def run_self_check(active: str) -> int:
+    """自检：**失败集合必须等于预期集合**（少红 = mutant 没生效；多红 = 不够外科）。
+
+    早先的写法是"只要有失败就 exit 0"，那等于给了 mutant 一条假绿通道：
+    假设 ②③ 因别的原因没红、只剩 流程 红，也会印"SELF-CHECK 通过"。
+    """
+    want = EXPECTED_RED[active]
+    actual = {case_key(n) for n, ok, _ in RESULTS if not ok}
+    missing = sorted(want - actual)
+    extra = sorted(actual - want)
+    print(f"[SELF-CHECK] {active}：预期红={sorted(want)} 实际红={sorted(actual)}")
+    ok = True
+    if missing:
+        print(f"[SELF-CHECK] 少红 {missing} → mutant 没生效或断言失效（不能放行）")
+        ok = False
+    if extra:
+        print(f"[SELF-CHECK] 多红 {extra} → mutant 不够外科，会掩盖归因")
+        ok = False
+    marker = EXPECTED_CAUGHT_BY.get(active)
+    if marker:
+        details = [d for n, okk, d in RESULTS if not okk and case_key(n) in want]
+        if any(marker in d for d in details):
+            print(f"[SELF-CHECK] {marker} 命中（防线指名接住）")
+        else:
+            print(f"[SELF-CHECK] 缺 {marker} → 红的原因不是预期的那个，证据无效")
+            ok = False
+    print("[SELF-CHECK] 通过" if ok else "[SELF-CHECK] 失效")
+    if SKIPS:
+        print(f"[SELF-CHECK] 注意：本轮有 {len(SKIPS)} 项环境跳过，集合比对可能不完整")
+    return 0 if ok else 2
 
 
 def main() -> int:
     argv = sys.argv[1:]
+    if not reject_unknown_args(argv):
+        return 2
     mutant = "--mutant" in argv
     mutant_reset = "--mutant-reset" in argv
     mutant_collateral = "--mutant-collateral" in argv
@@ -685,7 +777,8 @@ def main() -> int:
     if mutant:
         install_mutant_patch()
         print("=" * 70)
-        print("!!! mutant：判定基准退回「检查时刻」—— ①②③ + 流程(连坐) 必须红")
+        print("!!! mutant：判定基准退回「检查时刻」—— 预期红 ②③ + 流程(连坐)"
+              "（① 注入 ~105ms、检查 ~225ms 未越 300ms，按 180ms 阈值不该红）")
         print("=" * 70)
     if mutant_reset:
         install_mutant_reset_patch()
@@ -742,44 +835,12 @@ def main() -> int:
     if root:
         shutil.rmtree(root, ignore_errors=True)
 
-    if mutant_reset or mutant_collateral or mutant_deadobj:
+    active = next((a for a in MUTANT_ARGS if a in argv), None)
+    if active is not None:
         print("\n" + "=" * 70)
-        if mutant_reset:
-            reuse_red = any(not ok for ok, _ in _by_label(REUSE_LABEL))
-            others = [n for n in failed if not n.startswith(REUSE_LABEL)]
-            if reuse_red and not others:
-                print("[SELF-CHECK] 通过：只有「重置(复用)」红 → 这条断言有鉴别力")
-            elif reuse_red:
-                print(f"[SELF-CHECK] 部分通过：「重置(复用)」红，但另有 {len(others)} 条也红"
-                      f"（{others}）→ mutant 不够外科，需查")
-            else:
-                print("[SELF-CHECK] 失效：「重置(复用)」没红 → 抓不到重置缺失")
-            ok_self = reuse_red
-        else:
-            # 注意：这里要按**族前缀**匹配，不能按 FLOW_LABEL 全名 ——
-            # 死对象防线的判词是"流程(连坐) 次轮注入前面板仍在（450ms 窗口）"，
-            # 它不以 FLOW_LABEL 开头。按全名匹配会导致自证永远"失效"（假红）。
-            details = [d for n, ok, d in RESULTS
-                       if n.startswith("流程(连坐)") and not ok]
-            want = "caught_by=gate" if mutant_collateral else "caught_by=except"
-            hit = [d for d in details if want in d]
-            if hit:
-                print(f"[SELF-CHECK] 通过：流程(连坐) 报 FAIL，且 {want} 命中 → "
-                      "该防线单独有效（有汇总行、没崩）")
-            else:
-                print(f"[SELF-CHECK] 失效：流程(连坐) 没报出 {want} "
-                      f"（details={details or '无失败项，可能被 SKIP 吞了'}）")
-            ok_self = bool(hit)
+        code = run_self_check(active)
         print("=" * 70)
-        return 0 if ok_self else 2
-
-    if mutant:
-        print("\n" + "=" * 70)
-        print(f"[SELF-CHECK] mutant 下失败 {len(failed)} 项"
-              + ("（预期：②③ + 流程(连坐)；① 实测 ~105ms < 180ms 误判阈值，"
-                 "按理论**不该**红）" if failed else "—— 全绿说明探针失效"))
-        print("=" * 70)
-        return 0 if failed else 2
+        return code
 
     return 0 if not failed else 1
 

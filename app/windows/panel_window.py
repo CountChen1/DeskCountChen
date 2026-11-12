@@ -179,6 +179,13 @@ class PanelWindow(QWidget):
         # 0.0 表示"从未 show 过"，此时宽限判定必然早已过期 → 直接走原有判死逻辑，
         # 与 v1.4 行为一致（这条宽限只会**少关**，不会多关）。
         self._shown_at: float = 0.0
+        # 最近一次"失活事件"**发生**的单调时刻（秒），0.0 表示从未收到过失活事件。
+        # ⚠️ 宽限判据必须用它，而不是 _check_deactivate 被调用时的 time.monotonic()：
+        # singleShot(120ms) 让"检查时刻"必然晚于"事件时刻"，而 show() 之后主线程
+        # 并不空闲（毛玻璃截屏 6–12ms + 缩放淡入 140ms + 首次建 PanelModel ~293ms），
+        # 定时器完全可能被压到 300ms 之后才执行 → 打开手势造成的那次失活在检查时
+        # 看起来"已经过了宽限"→ 面板一闪而过。这正是 P0-1 的同一场景。
+        self._deactivate_at: float = 0.0
         self._last_blur_ms: float = 0.0
         self._final_geom = QRect()
         self._anim_start_geom = QRect()
@@ -575,6 +582,7 @@ class PanelWindow(QWidget):
         # changeEvent 只能收到 ActivationChange（点任务栏时不发 ActivationChange
         # 的场景也要覆盖，因此两处都拦）。
         if event.type() == QEvent.Type.WindowDeactivate:
+            self._deactivate_at = time.monotonic()      # 事件发生时刻（非检查时刻）
             QTimer.singleShot(CLOSE_DELAY_MS, self._check_deactivate)
         return super().event(event)
 
@@ -582,6 +590,7 @@ class PanelWindow(QWidget):
         super().changeEvent(event)
         if (event.type() == QEvent.Type.ActivationChange
                 and not self.isActiveWindow()):
+            self._deactivate_at = time.monotonic()      # 事件发生时刻（非检查时刻）
             QTimer.singleShot(CLOSE_DELAY_MS, self._check_deactivate)
 
     def _check_deactivate(self) -> None:
@@ -603,16 +612,27 @@ class PanelWindow(QWidget):
         已经被自己关掉）。作废才是对的：这一次失活属于"打开它的那个手势"，
         不是"用户走开了"。用户真的走开时，宽限之后还会有失活/外点，那才该关。
 
-        时间基准 ``_shown_at`` 由 ``showEvent`` 写入。语义一句话：
-        **宽限内直接丢弃；宽限之后仍走 120ms 复核**（``CLOSE_DELAY_MS`` 未变）。
+        时间基准：**用失活事件的发生时刻 ``_deactivate_at``（由 ``event()`` /
+        ``changeEvent()`` 打戳），而不是本函数被调用时的 ``time.monotonic()``。**
+        ``singleShot(120ms)`` 本来就保证"检查时刻晚于事件时刻"，而 ``show()`` 之后
+        主线程并不空闲（毛玻璃截屏 + 140ms 淡入 + 首次建 ``PanelModel``），定时器被
+        压到 300ms 之后执行是常态。用检查时刻判，就会把"打开它的那个手势造成的失活"
+        误判成"用户走开了"，面板一闪而过。
+        —— 「失活发生在什么时候」和「我们什么时候去检查它」是两件事。
+
+        语义一句话：**事件时刻在宽限内 → 作废；事件时刻在宽限外 → 判死**
+        （仍然走 120ms 复核，``CLOSE_DELAY_MS`` 未变）。
         """
         from PySide6.QtWidgets import QApplication
 
         if not self.isVisible():
             return
-        if time.monotonic() - self._shown_at < SHOW_GRACE_S:
+        if self._deactivate_at <= 0.0:      # 从未收到过失活事件：没什么可判的
+            return
+        elapsed_ms = (self._deactivate_at - self._shown_at) * 1000.0
+        if elapsed_ms < SHOW_GRACE_S * 1000.0:
             logger.debug("开场宽限内的失活：丢弃，不关闭面板（%.0fms < %sms）",
-                         (time.monotonic() - self._shown_at) * 1000.0, GRACE_MS)
+                         elapsed_ms, GRACE_MS)
             return
         if QApplication.activeWindow() is not self:
             self.close_with_reason(REASON_DEACTIVATE)

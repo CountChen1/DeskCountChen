@@ -17,6 +17,11 @@ v1.5 的 P0-1 修好了"关不掉"，但宽限期（红线 1）当初只做在
 2. 超出宽限后触发失活复核 → 正常关闭，且原因仍是 ``deactivate``；
 3. 宽限内那次失活**作废**：不重排定时器、也不延迟爆雷，宽限结束后**不得**因为
    **这一次**失活而关闭。
+4. 宽限判据用的是**失活事件的发生时刻**（``_deactivate_at``），不是
+   ``_check_deactivate`` 被调用时的 ``time.monotonic()``。``singleShot(120ms)``
+   保证"检查时刻晚于事件时刻"，而 ``show()`` 之后主线程被截屏/淡入/建模压住时，
+   复核可能迟到 300ms 以上——用检查时刻判就会把"打开手势的失活"误判成
+   "用户走开了"，面板一闪而过。
 
 > ⚠️ **反例，勿照做**：第 3 条**曾经**是"宽限内那次复核会自动重排、300ms 后把面板
 > 关掉"（defer 方案），已被两轮实测否掉（关闭时刻从 190ms 只挪到 ~305ms，缺陷
@@ -162,6 +167,10 @@ class DeactivateGraceTests(unittest.TestCase):
             self.assertFalse(pw.isActiveWindow())      # 前置：确实"失活"了
             self.assertTrue(pw.isVisible())
 
+            # ⚠️ 必须打戳：宽限判据用的是**事件发生时刻**，不打戳就走
+            # ``_deactivate_at <= 0.0`` 那条"从未失活"分支直接 return，
+            # 用例会假绿（空过当通过，踩过的坑）。
+            pw._deactivate_at = pw._shown_at + 0.06    # noqa: SLF001 - 60ms 时失活
             pw._check_deactivate()                     # noqa: SLF001 - 直接触发复核
 
             self.assertEqual(pw.close_reason, "")
@@ -183,6 +192,7 @@ class DeactivateGraceTests(unittest.TestCase):
         try:
             # 把起点往前拨 400ms：等价于"面板已经开了 400ms"
             pw._shown_at -= 0.4                        # noqa: SLF001 - 构造"已过宽限"
+            pw._deactivate_at = time.monotonic()       # noqa: SLF001 - 此刻发生失活
             pw._check_deactivate()                     # noqa: SLF001
 
             self.assertEqual(pw.close_reason, REASON_DEACTIVATE)
@@ -205,6 +215,7 @@ class DeactivateGraceTests(unittest.TestCase):
         pw, other = self._shown_panel_with_other_active()
         try:
             pw._shown_at = time.monotonic()            # noqa: SLF001 - 宽限从"现在"起算
+            pw._deactivate_at = pw._shown_at           # noqa: SLF001 - 0ms 时失活
             pw._check_deactivate()                     # noqa: SLF001
             self.assertTrue(pw.isVisible())
 
@@ -224,11 +235,110 @@ class DeactivateGraceTests(unittest.TestCase):
         pw, other = self._shown_panel_with_other_active()
         try:
             pw._shown_at = time.monotonic()            # noqa: SLF001
+            pw._deactivate_at = pw._shown_at           # noqa: SLF001 - 必须先打戳
             for _ in range(3):
                 pw._check_deactivate()                 # noqa: SLF001
             pump(0.10)
             self.assertTrue(pw.isVisible())
             self.assertEqual(pw.close_reason, "")
+        finally:
+            pw.close()
+            other.close()
+            pw.deleteLater()
+            other.deleteLater()
+
+    # -- 判据用"事件时刻"而非"检查时刻"（主线程繁忙时定时器会迟到） -------------
+
+    def test_late_check_still_uses_event_time_within_grace(self) -> None:
+        """事件时刻在宽限内、检查时刻远在宽限外 → **作废**（不关）。
+
+        场景来源：``show()`` 之后主线程并不空闲（毛玻璃截屏 6–12ms + 140ms 淡入 +
+        首次建 ``PanelModel`` ~293ms），``singleShot(120ms)`` 的复核完全可能被压到
+        300ms 之后才执行。若用检查时刻判，那次属于"打开手势"的失活会被误判成
+        "用户走开了" → 面板一闪而过（P0-1 的镜像）。
+        """
+        pw, other = self._shown_panel_with_other_active()
+        try:
+            now = time.monotonic()
+            pw._shown_at = now - 1.0                   # noqa: SLF001 - 检查时刻已过 1s
+            pw._deactivate_at = pw._shown_at + 0.06    # noqa: SLF001 - 事件在 60ms
+            elapsed_hint = (now - pw._shown_at) * 1000.0
+            self.assertGreater(elapsed_hint, GRACE_MS,
+                               "前置：检查时刻必须已经超出宽限期，否则测不到这个缺陷")
+
+            pw._check_deactivate()                     # noqa: SLF001
+
+            self.assertEqual(pw.close_reason, "")
+            self.assertFalse(pw._closing)              # noqa: SLF001
+            self.assertTrue(pw.isVisible())
+        finally:
+            pw.close()
+            other.close()
+            pw.deleteLater()
+            other.deleteLater()
+
+    def test_late_check_after_event_beyond_grace_closes(self) -> None:
+        """事件时刻在宽限外（900ms）→ **判死**（B4「点桌面必关」不受影响）。"""
+        pw, other = self._shown_panel_with_other_active()
+        try:
+            pw._shown_at = time.monotonic() - 1.0      # noqa: SLF001
+            pw._deactivate_at = pw._shown_at + 0.9     # noqa: SLF001 - 事件在 900ms
+
+            pw._check_deactivate()                     # noqa: SLF001
+
+            self.assertEqual(pw.close_reason, REASON_DEACTIVATE)
+            self.assertTrue(pw._closing)               # noqa: SLF001
+        finally:
+            pw.close()
+            other.close()
+            pw.deleteLater()
+            other.deleteLater()
+
+    def test_no_deactivate_event_is_a_noop(self) -> None:
+        """从未收到过失活事件时复核是空操作（**不能**当成"面板该关"的依据）。
+
+        这条同时也是对本文件其余用例的护栏：它们靠显式给 ``_deactivate_at``
+        打戳来"武装"自己，忘了打戳就会走这条分支而假绿。
+
+        注：``_shown_panel_with_other_active()`` 里 ``other.show()`` 会真的派发一次
+        ``WindowDeactivate``（实测确实打上了戳），所以这里显式清零来构造"从未失活"。
+        """
+        pw, other = self._shown_panel_with_other_active()
+        try:
+            pw._deactivate_at = 0.0                    # noqa: SLF001 - 构造"从未失活"
+            pw._shown_at = time.monotonic() - 5.0      # noqa: SLF001 - 早已过宽限
+            pw._check_deactivate()                     # noqa: SLF001
+            self.assertEqual(pw.close_reason, "")
+            self.assertTrue(pw.isVisible())
+        finally:
+            pw.close()
+            other.close()
+            pw.deleteLater()
+            other.deleteLater()
+
+    def test_real_deactivate_event_stamps_deactivate_at(self) -> None:
+        """真实 ``WindowDeactivate`` 必须在**事件里**打戳（不是靠轮询补）。
+
+        这条是「判据换时刻」这项改动的接线检查：``event()`` / ``changeEvent()``
+        里漏了 ``self._deactivate_at = time.monotonic()`` 时，前一条单测会因为
+        ``<= 0.0`` 直接 return 而假绿，只有这条会红。
+        """
+        pw = make_panel()
+        other = QWidget()
+        try:
+            pw.show()
+            qt_app().processEvents()
+            pw._watch.stop()                           # noqa: SLF001
+            self.assertEqual(pw._deactivate_at, 0.0)   # noqa: SLF001 - 尚未失活
+
+            before = time.monotonic()
+            other.show()                               # 抢走激活 → 真实失活事件
+            qt_app().processEvents()
+            after = time.monotonic()
+
+            self.assertFalse(pw.isActiveWindow())
+            self.assertGreaterEqual(pw._deactivate_at, before)  # noqa: SLF001
+            self.assertLessEqual(pw._deactivate_at, after)      # noqa: SLF001
         finally:
             pw.close()
             other.close()

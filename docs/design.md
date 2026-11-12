@@ -1849,17 +1849,31 @@ QScreen.grabWindow(0, 面板区域)      # 只抓面板那一小块（整屏 25�
 - 只加前置闸不够，`sendEvent` 外面还要挡住 `RuntimeError` 并判 **FAIL**。但按 §11.4.1，
   **这两道防线必须各有"只放行它"的隔离用例** —— 否则一道失效、另一道替它扛，就是多防线假绿。
 
-**`caught_by` 必须分三值**，否则不同 mutant 会撞在同一道闸上，看起来"都抓到了"：
+**`caught_by` 分两值**，否则不同 mutant 会撞在同一道闸上，看起来"都抓到了"：
 
-| 触发形态 | 面板状态 | 接住它的 | 期望 `caught_by=` |
+| 触发形态 | `controller.panel` 的状态 | 接住它的 | 期望 `caught_by=` |
 |---|---|---|---|
-| 第二块被 `close_with_reason` 关掉（连坐 mutant） | `controller.panel` 变成 `None` | 早死闸 | `gate` |
-| 自然路径：`controller.panel` 已不是 `pw` | 引用已换 | 守卫 | `guard` |
-| `deleteLater()` 后 C++ 已销毁、Python wrapper 仍活 | `controller.panel is pw` 仍为 `True`（闸过不去） | `sendEvent` 的 `RuntimeError` | `except` |
+| 面板已被关掉（连坐 mutant / 自然路径 / 任何 `close_with_reason`） | 变成 `None` | 早死闸 | `gate` |
+| `deleteLater()` 后 C++ 已销毁、Python wrapper 仍活 | 仍是 `pw`（`is pw` 为真，闸放行） | `sendEvent` 的 `RuntimeError` | `except` |
 
-第二行和第三行是**同一条防线链上的两个不同位置**，必须能分辨：`guard` 证明的是
-"`controller.panel` 与 `pw` 的引用比对有效"，`except` 证明的是"C++ 已销毁时还有兜底"。
-两者合成一个值，就等于其中一道**从未被验证过**。
+**为什么不是三值（原拟 `gate|guard|except`）：`guard` 被 `gate` 吸收。**
+`controller.panel` 的**取值域只有 `{None, 当前那一个 pw}`** —— `close_panel()` 先置
+`None` 再 `close()`；`open_panel()` 在新面板建好之后才赋值；全量赋值点无一例外，
+**没有任何一处把 `self.panel` 指成第三块面板**。所以"引用不指向它"与"引用为 `None`"
+在产品行为上完全等价，由 `gate` 一并覆盖。剩下唯一的"不同"是**探针自己攥着过期引用
+再开新面板** —— 那是用例自造的姿势，不是产品形态，为它造 mutant 就是造一个不存在的入口。
+
+保留 `except` 是因为它挡的是**另一种形态**：C++ 已销毁、但 `controller.panel` 仍指向
+那个 wrapper，`is pw` 为真、闸会放行，只有 `sendEvent` 才炸得出异常。
+
+但方法论的结论不变：**把这两值合并成一个，就等于其中一道从未被验证过。**
+两值的好处是二者都**可达**、且各有专属 mutant（`gate` ← `--mutant-collateral`，
+`except` ← `--mutant-deadobj`），比"三值里有一个永远看不到"诚实。
+
+> 另有一个按**位置**（而非判据）命名的可观测点：闸过了、注入之前那一瞬死掉。
+> 它需要造微小时窗 mutant，成本高且不稳，**不造**；按 §11.4.1 的诚实做法，在探针
+> docstring 里写明"该时窗无隔离用例，`except` 仅作兜底"即可，不留一道没人验证过的
+> 防线当免责声明。
 
 **处置**：不要为了消红去放宽 B 段断言或加 `SKIP`。已经做的两件事是把红
 **正确归类**——`SKIP` 计入统计（`PASS` 不计）、并在判词里点名 pid 与原因；

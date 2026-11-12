@@ -655,6 +655,14 @@ class PanelWindow(QWidget):
         # 将来若把 PanelWindow 改成复用对象（缓存+重新 show），忘了重置这里就会
         # 让宽限永远"早已过期"→ 面板又回到"一闪而过"，而且巨难查。
         self._shown_at = time.monotonic()
+        # ⚠️ 与 _shown_at 一起清空，不能靠 __init__ 的 0.0 兜着。
+        # 判据是 (self._deactivate_at - self._shown_at)：若残留上一轮面板的旧戳，
+        # 这个差会变成**负数**（旧事件早于本次 show → 永远落进宽限内 → 该关的不关）
+        # 或**超大值**（跨轮次时间差 → 永远落出宽限 → 该作废的判死），两种都不可预测。
+        # 目前 open_panel 每次都 new 一个 PanelWindow，__init__ 里就是 0.0，所以
+        # 靠的是"恰好成立"；这行的目的是把它变成**代码里的保证**，而不是注释里的
+        # 一句"将来别忘"。反例见 §12.1.1.1 第 4 条：旧戳泄漏属于"时刻混淆"。
+        self._deactivate_at = 0.0
         self._recapture_timer.stop()
         if not self._fade_pending:
             self._fade = 1.0

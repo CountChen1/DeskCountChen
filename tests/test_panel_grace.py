@@ -140,6 +140,33 @@ class GraceConstantTests(unittest.TestCase):
             pw.close()
             pw.deleteLater()
 
+    def test_show_resets_deactivate_at(self) -> None:
+        """``showEvent`` 必须把 ``_deactivate_at`` 一起清空（不能只靠 ``__init__``）。
+
+        为什么要单独立一条：目前 ``open_panel`` 每次都 new 一个 ``PanelWindow``，
+        ``__init__`` 里就是 0.0，所以"旧戳泄漏"这条路径**走不到**。也正因如此，
+        任何在"开第二个面板"层面写的断言都抓不到它 —— 那个新对象天然是 0.0，
+        属于空过。只有把**同一个对象** show 两次才能验证这行代码。
+
+        泄漏的后果是不确定的两个方向：旧事件早于本次 show → 差值为负 → 永远落进
+        宽限内 → 该关的不关；跨轮次时间差过大 → 永远落出宽限 → 该作废的判死。
+        """
+        pw = make_panel()
+        try:
+            pw.show()
+            qt_app().processEvents()
+
+            # 伪造"上一轮残留的旧戳"，再让同一个对象重新 show 一次
+            pw._deactivate_at = time.monotonic() - 10.0    # noqa: SLF001
+            pw.hide()
+            pw.show()
+            qt_app().processEvents()
+
+            self.assertEqual(pw._deactivate_at, 0.0)       # noqa: SLF001
+        finally:
+            pw.close()
+            pw.deleteLater()
+
 
 class DeactivateGraceTests(unittest.TestCase):
     """B3：deactivate 路径的开场宽限。"""

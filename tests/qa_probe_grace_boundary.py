@@ -55,17 +55,25 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
 会让它永远判漂、永远 SKIP —— 等于为了修 ① 把最贴边界的用例删掉。实测依据：那样跑
 ③ 三次实测 282ms 全被判漂。
 
-## ① 的事件时刻有 ~115ms 地板（下调目标压不下去）
+## ① 的事件时刻为什么曾被顶到 ~115ms：**是抢激活窗口的首帧，不是面板的**
 
-每块面板都是新实例，``open_panel`` 之后**第一次 ``processEvents()`` 本身就要 ~115ms**
-（新实例的首帧；预热只预热了字体/管线，预热不了"下一块新面板"）。所以：
+曾经的诊断是"每块面板都是新实例，`open_panel` 之后第一次 `processEvents()` 要 ~115ms"。
+**这个归因是错的**，实测把它推翻了：① 现在注入点是 **60～63ms**，说明面板首帧并不贵。
 
-- ① 目标 100ms → 实测事件 102～139ms；① 目标 60ms → 实测 **116 / 122 / 131ms**；
-- 把目标往下调**不会**让事件更早发生，只会让"偏离目标"更容易被判漂（因此
-  ``GROSS_DRIFT_MS`` 从 100 提到 140，保住原来 200ms 的绝对窗口）。
+真正的开销是 ``Stealer()`` 的**首次 ``show()``**（顶层控件首帧，~97ms）。它以前构造在
+``pump_until`` **之前**，于是这 ~97ms 被算进了"推进到目标时刻"里 —— 看起来像"事件更早
+发生不了"，其实是**别人的首帧被记在了注入点账上**。挪到 ``pump_until`` 之后（必须挪，
+见 ``_case_once`` 的注释），这笔开销就从注入点后面冒出来：目标 60ms → **实测 158～174ms**，
+离 180ms 误判线只剩 6～45ms。
 
-对 180ms 误判线的余量因此固定在大约 **50～64ms**，这是结构性的，改目标值解决不了。
-``--mutant`` 下若 ① 真漂过 180ms，会报"多红 [①] → exit 2" —— 那是漂移，不是缺陷。
+对策是**把 ``Stealer()`` 也预热一次**（见 ``warmup``）：之后它变便宜，注入点与失活时刻
+重新贴合。当前实测：
+
+- 注入点 **60～63ms**，失活事件 **66～80ms**，+120ms 复核 **186～200ms**；
+- 对 180ms 误判线的余量 **100ms 以上**（旧版只有 49ms，且依赖"面板首帧"这个错误归因）。
+
+``GROSS_DRIFT_MS`` 保持 140 不变（绝对窗口 200ms）：① 的漂移判据是"落错侧 或 >200ms"，
+把 60ms 目标放宽到 200ms，给新面板首帧留了余量，同时不会撞上 180ms。
 
 ## 死对象守卫（两道，各自都要能单独审）
 
@@ -105,11 +113,11 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
 | ``--mutant-reset``（showEvent 不重置） | 绿 | 绿 | 绿 | **红** |
 | ``--mutant-collateral``（静置期 ``close_panel`` 掉第二块） | 绿 | 绿 | **红**(caught_by=gate) | 绿 |
 | ``--mutant-deadobj``（只 ``deleteLater``：wrapper 活、C++ 已死） | 绿 | 绿 | **红**(caught_by=except) | 绿 |
-| ``--mutant-nograce``（产品 ``SHOW_GRACE_S = 0``：宽限消失） | **红** | **红** | **红** | 绿△ |
+| ``--mutant-nograce``（产品 ``SHOW_GRACE_S = 0``：宽限消失） | **红** | 绿 | **红** | 绿△ |
 
 ※ ``--mutant`` 下 ① 是绿的，**这是对的**：mutant 只在"检查时刻"越过 300ms 时才发作，
 而检查时刻 = 事件时刻 + ``CLOSE_DELAY_MS``(120)，所以只有 ``事件 >= 180ms`` 才会误判。
-① 实测事件 **116～131ms**（目标 60ms，地板 ~115ms），检查 236～251ms，**离 300ms 还有 49ms 以上**，
+① 实测事件 **66～80ms**（目标 60ms），检查 186～200ms，**离 300ms 还有 100ms 以上**，
 mutant 在这里与正确实现**必然同结论** —— 它绿不代表它没测宽限，代表 mutant 的作用点
 不在 ① 的区间。②（203→323ms）③（282→402ms）在 180ms 以上，所以红。
 
@@ -120,8 +128,17 @@ mutant 在这里与正确实现**必然同结论** —— 它绿不代表它没�
 
 ``--mutant-nograce`` 是 ① 的**隔离自证**：① 在 ``--mutant`` 下天然红不了（见 ※），
 没有这一条，"① 的断言能不能被证伪"就只存在于一次性的树外实验里，**封版后不可复核**。
-它的红一半来自断言本身（①② 在自己的检查时刻判死），一半来自早死闸（③④ 与 流程 在
-注入前就已被关掉），但**每条都落在自己的键上**，集合相等照样成立。
+
+它的红**全部来自各自的断言**，一条都不来自早死闸 —— 这依赖 ``Stealer()`` 必须等到
+``pump_until`` 之后才构造（三处）。提前构造时 ``__init__`` 里的 ``show()`` 会在 t0+~5ms
+打一发真失活，宽限=0 下那发在 ~125ms 就把面板关掉，于是 200/280/420ms 的用例全死在
+"注入之前"，红落在闸上：**键对得上、集合相等照样成立，但 mutant 想验的那条断言
+一次都没被求值**。所以自检额外要求 ① 的判词**不得含 ``caught_by=gate``**（红在闸上 →
+exit 2）。这条独立于 ``Stealer()`` 的位置，谁把它挪回去都会立刻叫。
+
+④ 的**绿**同样是断言：宽限=0 时"宽限外关闭"这条路径仍然工作。它是这个 mutant 唯一
+"没把关闭路径一起弄坏"的信号，**不许塞回预期红** —— 把期望集撑大到等于结果，等于用
+harness 的附带伤害冒充覆盖。
 
 后两行是两道死对象防线的**隔离自证**：按 §11.4.1，每道防线都要有"只放行它"的用例，
 否则一道失效会被另一道替它扛，看起来全绿其实早废了。
@@ -414,6 +431,17 @@ def warmup(app, controller) -> None:
     pump(app, 0.35)
     controller.close_panel()
     pump(app, 0.25)
+    # ⚠️ 抢激活那个窗口**也要预热**，理由和面板一样，但后果更隐蔽：
+    # ``Stealer()`` 的首次 ``show()`` 自己就要 ~97ms（顶层控件首帧）。``Stealer()`` 现在
+    # 构造在**目标时刻**（挪到 ``pump_until`` 之后，见 ``_case_once``），所以这 ~97ms
+    # 落在**计时窗口之内**，把实测事件时刻整体后推：61ms 目标 → 实测 158～174ms，
+    # 离 180ms 误判线只剩 6～45ms，``--mutant`` 会因此偶发"多红 ①"。
+    # 预热一次之后 ``Stealer()`` 变便宜，注入点与失活时刻重新贴合（实测 +5～8ms）。
+    st = Stealer()
+    st.steal()
+    pump(app, 0.15)
+    st.close()
+    pump(app, 0.10)
 
 
 def case(app, controller, label: str, fire_at_ms: float, expect_alive: bool) -> None:
@@ -438,12 +466,19 @@ def _case_once(app, controller, label, fire_at_ms, expect_alive, attempt):  # no
         check(f"{label} open_panel 产出面板", False, "controller.panel is None")
         return None
     t0 = shown_at(pw)
-    stealer = Stealer()
+    stealer = None
     try:
         actual_ms = pump_until(app, fire_at_ms / 1000.0, t0)
         if not gate_alive(f"{label} 注入前面板仍在（目标 {fire_at_ms:.0f}ms）",
                           controller, pw, actual_ms):
             return None
+        # ⚠️ 抢激活的窗口**必须在这里才创建**，不能提到 pump_until 之前。
+        # ``Stealer.__init__`` 里 ``show()`` 会立刻拿走激活 → 面板在 t0+~5ms 就收到一发
+        # **真失活**。那发失活平时无害，只因为**宽限把它丢弃了** —— 也就是说"正常模式的通过"
+        # 曾经依赖被测特性本身。宽限一被置 0（``--mutant-nograce``），它会在 ~125ms 把面板关掉，
+        # 于是 200/280/420ms 的用例全死在"注入之前"，红落在早死闸上而不是各自的断言上。
+        # 挪到 pump_until 之后，幽灵失活与合成注入在时间上重合，那层耦合就断了。
+        stealer = Stealer()
         before = deactivate_at(pw)
         stealer.steal()
         if not send_deactivate(pw):
@@ -457,7 +492,8 @@ def _case_once(app, controller, label, fire_at_ms, expect_alive, attempt):  # no
         qt_still_panel = QApplication.activeWindow() is pw
         pump(app, (GRACE_MS + CLOSE_DELAY_MS) / 1000.0)
     finally:
-        stealer.close()
+        if stealer is not None:
+            stealer.close()
 
     alive = controller.panel is not None
     reason = safe_reason(pw)
@@ -528,12 +564,13 @@ def case_flow(app, controller) -> None:
         check("流程(连坐) open_panel 产出面板", False, "controller.panel is None")
         return
     t0 = shown_at(pw)
-    st = Stealer()
+    st = None
     try:
         elapsed = pump_until(app, 0.20, t0)
         if not gate_alive("流程(连坐) 首轮注入前面板仍在（200ms 窗口）",
                           controller, pw, elapsed):
             return
+        st = Stealer()          # 抢激活必须在 pump_until 之后，理由见 _case_once
         before = deactivate_at(pw)
         st.steal()
         if not send_deactivate(pw):
@@ -545,7 +582,8 @@ def case_flow(app, controller) -> None:
         first_fired = deactivate_at(pw) > before
         pump(app, 0.30)
     finally:
-        st.close()
+        if st is not None:
+            st.close()
     first_alive = controller.panel is not None
     _cleanup(controller, app)
 
@@ -558,12 +596,13 @@ def case_flow(app, controller) -> None:
         return
     t1 = shown_at(pw2)
     arm_fault(controller, pw2)
-    st2 = Stealer()
+    st2 = None
     try:
         elapsed2 = pump_until(app, 0.45, t1)
         if not gate_alive("流程(连坐) 次轮注入前面板仍在（450ms 窗口）",
                           controller, pw2, elapsed2, "疑似被首轮连坐"):
             return
+        st2 = Stealer()         # 抢激活必须在 pump_until 之后，理由见 _case_once
         before2 = deactivate_at(pw2)
         st2.steal()
         if not send_deactivate(pw2):
@@ -577,7 +616,8 @@ def case_flow(app, controller) -> None:
         qt_still_panel = QApplication.activeWindow() is pw2
         pump(app, 0.35)
     finally:
-        st2.close()
+        if st2 is not None:
+            st2.close()
     second_closed = controller.panel is None
     reason = safe_reason(pw2)
 
@@ -661,7 +701,7 @@ def install_mutant_patch() -> None:
 
     这个 mutant 就是产品原本那个缺陷（用 ``time.monotonic() - _shown_at`` 判宽限），
     只是被挪到 monkeypatch 里、不碰 ``app/`` 源码。此时 **②③ + 流程(连坐)** 必须红；
-    ①（实测 116～131ms）**不该红** —— 它离 180ms 误判线还有 49ms 以上，mutant 在那里
+    ①（实测 66～80ms）**不该红** —— 它离 180ms 误判线还有 100ms 以上，mutant 在那里
     与正确实现同结论。① 的可证伪性由 ``--mutant-nograce`` 负责。
     """
     from app.windows import panel_window as PW
@@ -764,7 +804,7 @@ EXPECTED_RED = {
     "--mutant-reset": {"重置"},
     "--mutant-collateral": {"流程"},
     "--mutant-deadobj": {"流程"},
-    "--mutant-nograce": {"①", "②", "③", "④", "流程"},
+    "--mutant-nograce": {"①", "②", "③", "流程"},
 }
 # 这几组的红还必须**指名是哪道防线接住的**
 EXPECTED_CAUGHT_BY = {
@@ -773,11 +813,11 @@ EXPECTED_CAUGHT_BY = {
 }
 # 自检通过时要说明**为什么某些项是绿的** —— 不让"恰好绿"混进来
 SELF_CHECK_NOTE = {
-    "--mutant": "① 绿是算术必然：mutant 只发作于 事件>=180ms，① 实测 116~131ms，"
-                "检查 236~251ms 离 300ms 还有 49ms 以上，两种实现同结论。",
+    "--mutant": "① 绿是算术必然：mutant 只发作于 事件>=180ms，① 实测 66~80ms，"
+                "检查 186~200ms 离 300ms 还有 100ms 以上，两种实现同结论。",
     "--mutant-nograce": "重置(复用) 绿是对的：它只测 showEvent 把 _deactivate_at 清回 0.0，"
                         "全程不经过 _check_deactivate，与宽限常量无关；它若红了说明 mutant "
-                        "打错了对象。",
+                        "打错了对象。④ 绿也是断言：宽限=0 时'宽限外关闭'仍然工作。",
 }
 
 
@@ -846,6 +886,17 @@ def run_self_check(active: str) -> int:
         else:
             print(f"[SELF-CHECK] 缺 {marker} → 红的原因不是预期的那个，证据无效")
             ok = False
+    # ① 的红必须来自它**自己的断言**（``expect_alive`` 为假），不能来自早死闸。
+    # 判词带 ``caught_by=gate`` = 面板在注入前就没了 = ``expect_alive`` 一次都没被求值，
+    # 而红照样落在键 ① 上 —— 集合相等看不出来。nograce 存在的唯一目的就是证明
+    # "① 可证伪"，所以这种红必须判**自检失效**，不许记通过。
+    if active == "--mutant-nograce":
+        d1 = next((d for n, okk, d in RESULTS if not okk and case_key(n) == "①"), "")
+        if "caught_by=gate" in d1:
+            print("[SELF-CHECK] ① 红在早死闸上 → 本轮没验到断言（自检失效，不算通过）")
+            ok = False
+        else:
+            print("[SELF-CHECK] ① 由自己的断言判红（可证伪性成立）")
     print("[SELF-CHECK] 通过" if ok else "[SELF-CHECK] 失效")
     note = SELF_CHECK_NOTE.get(active)
     if note and ok:

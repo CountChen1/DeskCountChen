@@ -68,15 +68,31 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
   （判词写明"面板对象已销毁，场景未成立"），**不许判 SKIP** —— 那是产品没把生命周期
   管干净才会走到这里。
 
+### ``caught_by`` 只有两个值：``gate`` / ``except``
+
+原来的三值方案里还有个 ``guard``（"引用被换成另一块面板"），**实测后取消**：
+``controller.panel`` 的取值域是 ``{None, 当前那块 pw}`` —— ``app/controller.py`` 里
+只有 ``318: = pw`` / ``346: = None``（``close_panel`` 先置 None 再 close）/ ``374: = None``
+三处赋值，没有一处赋成第三块面板。所以 ``guard``（``is not pw``）与 ``gate``（``is None``）
+在产品行为上等价，已由 ``gate`` 吸收。**不为一个产品里走不到的形态造 mutant** ——
+用走不到的路径冒充覆盖，比没有覆盖更糟，它会让人相信有一道防线在守。
+
+### 一条诚实的限制：闸与 ``sendEvent`` 之间有微小时窗
+
+闸通过之后、``sendEvent`` 之前，对象仍可能被销毁。**该时窗没有隔离用例**，
+``except`` 只作兜底，**不作为已验证的覆盖**（§11.4.1：宁写"没验证"，不假装验证过）。
+``--mutant-deadobj`` 造的是"闸之前就已销毁"的形态，证明 ``except`` 这条代码路径可达，
+但不等于证明了那个微小时窗。
+
 ## 自证矩阵（探针必须能红，且**只红该红的那条**）
 
 | 模式 | ①②③ | ④ | 流程(连坐) | 重置(复用) |
 |---|---|---|---|---|
 | 正常 | 绿 | 绿 | 绿 | 绿 |
-| ``--mutant``（判据退回检查时刻） | 绿※ | 绿 | **红** | 绿 |
+| ``--mutant``（判据退回检查时刻） | 绿※ | 绿 | **红**（首轮闸） | 绿 |
 | ``--mutant-reset``（showEvent 不重置） | 绿 | 绿 | 绿 | **红** |
-| ``--mutant-deadobj``（第二块在静置期被关掉） | 绿 | 绿 | **红**(caught_by=gate) | 绿 |
-| ``--mutant-deadobj-except``（守卫失效 + 对象被删） | 绿 | 绿 | **红**(caught_by=except) | 绿 |
+| ``--mutant-collateral``（静置期 ``close_panel`` 掉第二块） | 绿 | 绿 | **红**(caught_by=gate) | 绿 |
+| ``--mutant-deadobj``（只 ``deleteLater``：wrapper 活、C++ 已死） | 绿 | 绿 | **红**(caught_by=except) | 绿 |
 
 ※ ``--mutant`` 下 ① 是绿的，**这是对的**：mutant 只在"检查时刻"越过 300ms 时才发作，
 ① 实测注入 ~105ms、检查 ~225ms，还没越过边界。误判阈值是 ``event >= 180ms``，
@@ -89,8 +105,8 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
     .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py
     .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py --mutant
     .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py --mutant-reset
+    .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py --mutant-collateral
     .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py --mutant-deadobj
-    .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py --mutant-deadobj-except
 """
 from __future__ import annotations
 
@@ -119,7 +135,7 @@ from app.windows.panel_window import (  # noqa: E402
 GRACE_MS = 300                     # panel_watch.GRACE_MS
 GROSS_DRIFT_MS = 100               # 实测事件时刻偏离目标超过这个量 → 判漂、重试
 MAX_ATTEMPTS = 3                   # 漂移重试次数上限
-DEADOBJ_DELAY_MS = 100             # --mutant-deadobj：静置期第几毫秒把面板杀掉
+FAULT_DELAY_MS = 100               # 故障注入：静置期第几毫秒动手
 
 RESULTS: list[tuple[str, bool, str]] = []
 SKIPS: list[tuple[str, str]] = []
@@ -127,7 +143,7 @@ SKIPS: list[tuple[str, str]] = []
 FLOW_LABEL = "流程(连坐) 连开两块面板：第二块不被第一块连坐、拿到干净的宽限起点"
 REUSE_LABEL = "重置(复用) 同一对象 show 两次：showEvent 必须把 _deactivate_at 清回 0.0"
 
-DEADOBJ_MODE: str | None = None    # None | "guard" | "except"
+FAULT_MODE: str | None = None      # None | "collateral" | "deadobj"
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -281,23 +297,54 @@ def send_deactivate(pw) -> bool:                # noqa: ANN001
         return False
 
 
-def kill_panel(controller, pw) -> None:         # noqa: ANN001
-    """故障注入：把面板关掉并确保 C++ 对象被删（--mutant-deadobj* 用）。"""
+def forget_dead_panel(controller) -> None:      # noqa: ANN001
+    """**仅供故障注入路径**：抹掉 controller 手里那个已销毁的引用。
+
+    产品自身的取值域是 ``{None, 当前 pw}``（``close_panel`` 先置 None 再 close），
+    不会出现"指向已删对象"的状态。``--mutant-deadobj`` 是人为 ``deleteLater`` 而不走
+    ``close_panel``，才造出这种 **产品里不可能存在**的脏状态；不收拾的话，下一轮
+    ``open_panel()`` 里的 ``close_panel()`` 会对着死对象调 ``close()``，整支探针
+    就带 traceback 退出、**没有汇总行** —— 那正是我们自己定的 FAIL 形态。
+    """
+    try:
+        controller.panel = None
+        controller.active_cat_id = None
+    except Exception:                           # noqa: BLE001 - 兜底不该二次抛
+        pass
+
+
+def _safe_close(controller) -> None:             # noqa: ANN001
     try:
         controller.close_panel()
-    except Exception:                           # noqa: BLE001 - 注入失败不该让探针崩
+    except RuntimeError:
         pass
+
+
+def _safe_delete(pw) -> None:                   # noqa: ANN001
+    """只 ``deleteLater``，**不动 controller.panel** —— 这是关键区别。"""
     try:
-        QTimer.singleShot(120, pw.deleteLater)
-    except Exception:                           # noqa: BLE001
+        pw.deleteLater()
+    except RuntimeError:
         pass
 
 
-def arm_deadobj(controller, pw) -> None:        # noqa: ANN001
-    """在静置期把面板杀掉，模拟"被上一块连坐"的形态。"""
-    if DEADOBJ_MODE is None:
+def arm_fault(controller, pw) -> None:          # noqa: ANN001
+    """按当前 mutant 模式，在静置期注入故障。两种形态**分别对应两道防线**：
+
+    - ``collateral``：``close_panel()`` → ``controller.panel`` 变 ``None``
+      → **早死闸（gate）**接住。这就是"第二块被第一块连坐"的产品形态。
+    - ``deadobj``：只 ``deleteLater()`` → ``controller.panel`` **仍是那个 pw**
+      （``is pw`` 为真）→ 闸门**自然放行** → ``sendEvent`` 抛 ``RuntimeError``
+      → **except** 接住。这是"wrapper 还活着、C++ 已销毁"的形态。
+
+    两种形态**不 patch 产品、也不 patch 闸门**，所以能单独审。
+    """
+    if FAULT_MODE is None:
         return
-    QTimer.singleShot(DEADOBJ_DELAY_MS, lambda: kill_panel(controller, pw))
+    if FAULT_MODE == "collateral":
+        QTimer.singleShot(FAULT_DELAY_MS, lambda: _safe_close(controller))
+    elif FAULT_MODE == "deadobj":
+        QTimer.singleShot(FAULT_DELAY_MS, lambda: _safe_delete(pw))
 
 
 # --------------------------------------------------------------------------
@@ -351,6 +398,7 @@ def _case_once(app, controller, label, fire_at_ms, expect_alive, attempt):  # no
             check(f"{label} 注入成功（目标 {fire_at_ms:.0f}ms）", False,
                   "面板对象已销毁，场景未成立（疑似上一轮连坐），本条按 FAIL 记"
                   " caught_by=except")
+            forget_dead_panel(controller)
             return None
         pump(app, 0.03)
         fired = deactivate_at(pw)
@@ -398,8 +446,13 @@ def _case_once(app, controller, label, fire_at_ms, expect_alive, attempt):  # no
 
 
 def _cleanup(controller, app) -> None:          # noqa: ANN001
-    if controller.panel is not None:
-        controller.close_panel()
+    # close_panel() 先把 self.panel 置 None 再 close()，所以即使对象已销毁，
+    # 引用也已经被清掉；这里只兜住 close() 抛的 RuntimeError，别让它炸掉整支探针。
+    try:
+        if controller.panel is not None:
+            controller.close_panel()
+    except RuntimeError:
+        pass
     pump(app, 0.35)
 
 
@@ -434,6 +487,7 @@ def case_flow(app, controller) -> None:
         if not send_deactivate(pw):
             check("流程(连坐) 首轮注入成功", False,
                   "面板对象已销毁，场景未成立，本条按 FAIL 记 caught_by=except")
+            forget_dead_panel(controller)
             return
         pump(app, 0.03)
         first_fired = deactivate_at(pw) > before
@@ -450,7 +504,7 @@ def case_flow(app, controller) -> None:
         check("流程(连坐) 第二个面板产出", False, "controller.panel is None")
         return
     t1 = shown_at(pw2)
-    arm_deadobj(controller, pw2)
+    arm_fault(controller, pw2)
     st2 = Stealer()
     try:
         elapsed2 = pump_until(app, 0.45, t1)
@@ -463,6 +517,7 @@ def case_flow(app, controller) -> None:
             check("流程(连坐) 次轮注入成功", False,
                   "面板对象已销毁，场景未成立（疑似上一轮连坐），本条按 FAIL 记"
                   " caught_by=except")
+            forget_dead_panel(controller)
             return
         pump(app, 0.03)
         second_fired = deactivate_at(pw2) > before2
@@ -593,21 +648,23 @@ def install_mutant_reset_patch() -> None:
     PW.PanelWindow.showEvent = show_event           # type: ignore[method-assign]
 
 
-def install_mutant_deadobj(mode: str) -> None:
-    """死对象防线的隔离自证。
+def install_fault_mode(mode: str) -> None:
+    """把故障注入模式挂上（**不 patch 产品、不 patch 闸门**）。
 
-    - ``mode="guard"``：静置期把第二块关掉 → **(d) 早死闸**必须接住
-      （``caught_by=gate``）；
-    - ``mode="except"``：同上，但**先把守卫打掉**（模拟"守卫失效"），
-      → 只能由 **(e) sendEvent 的 except** 接住（``caught_by=except``）。
+    - ``collateral`` → 产出的形态是"面板被关掉"，由 **早死闸（gate）** 接住；
+    - ``deadobj``    → 产出的形态是"wrapper 活、C++ 已销毁"，闸门自然放行，
+      由 **sendEvent 的 except** 接住。
 
-    两个模式分别证明两道防线各自有效，避免"一道失效被另一道替它扛"的假绿。
+    ## 为什么没有 ``guard`` 这个值
+
+    ``controller.panel`` 的取值域是 ``{None, 当前那块 pw}``：``app/controller.py``
+    里只有 ``318: = pw`` / ``346: = None``（close_panel 先置 None 再 close）/
+    ``374: = None`` 三处赋值，**没有一处赋成第三块面板**。所以"引用被换成另一个对象"
+    在产品里走不到，``guard``（``is not pw``）与 ``gate``（``is None``）等价，
+    已由 ``gate`` 吸收 —— 不为一个走不到的形态造 mutant（那是"用走不到的路径冒充覆盖"）。
     """
-    global DEADOBJ_MODE
-    DEADOBJ_MODE = mode
-    if mode == "except":
-        globals()["gate_alive"] = lambda *a, **k: True       # 守卫失效
-        print("[MUTANT] 守卫已打掉，只保留 sendEvent 的 except")
+    global FAULT_MODE
+    FAULT_MODE = mode
 
 
 # --------------------------------------------------------------------------
@@ -622,8 +679,8 @@ def main() -> int:
     argv = sys.argv[1:]
     mutant = "--mutant" in argv
     mutant_reset = "--mutant-reset" in argv
+    mutant_collateral = "--mutant-collateral" in argv
     mutant_deadobj = "--mutant-deadobj" in argv
-    mutant_deadobj_except = "--mutant-deadobj-except" in argv
 
     if mutant:
         install_mutant_patch()
@@ -635,16 +692,16 @@ def main() -> int:
         print("=" * 70)
         print("!!! mutant-reset：showEvent 不再重置 _deactivate_at —— 只有 重置(复用) 该红")
         print("=" * 70)
-    if mutant_deadobj:
-        install_mutant_deadobj("guard")
+    if mutant_collateral:
+        install_fault_mode("collateral")
         print("=" * 70)
-        print(f"!!! mutant-deadobj：静置期第 {DEADOBJ_DELAY_MS}ms 把第二块关掉"
+        print(f"!!! mutant-collateral：静置期第 {FAULT_DELAY_MS}ms close_panel() 掉第二块"
               " —— 流程(连坐) 必须 FAIL 且 caught_by=gate")
         print("=" * 70)
-    if mutant_deadobj_except:
-        install_mutant_deadobj("except")
+    if mutant_deadobj:
+        install_fault_mode("deadobj")
         print("=" * 70)
-        print(f"!!! mutant-deadobj-except：守卫打掉 + 静置期第 {DEADOBJ_DELAY_MS}ms 删对象"
+        print(f"!!! mutant-deadobj：静置期第 {FAULT_DELAY_MS}ms 只 deleteLater（不动 controller.panel）"
               " —— 必须 FAIL 且 caught_by=except（有汇总行、不崩）")
         print("=" * 70)
 
@@ -685,7 +742,7 @@ def main() -> int:
     if root:
         shutil.rmtree(root, ignore_errors=True)
 
-    if mutant_reset or mutant_deadobj or mutant_deadobj_except:
+    if mutant_reset or mutant_collateral or mutant_deadobj:
         print("\n" + "=" * 70)
         if mutant_reset:
             reuse_red = any(not ok for ok, _ in _by_label(REUSE_LABEL))
@@ -704,7 +761,7 @@ def main() -> int:
             # 它不以 FLOW_LABEL 开头。按全名匹配会导致自证永远"失效"（假红）。
             details = [d for n, ok, d in RESULTS
                        if n.startswith("流程(连坐)") and not ok]
-            want = "caught_by=gate" if mutant_deadobj else "caught_by=except"
+            want = "caught_by=gate" if mutant_collateral else "caught_by=except"
             hit = [d for d in details if want in d]
             if hit:
                 print(f"[SELF-CHECK] 通过：流程(连坐) 报 FAIL，且 {want} 命中 → "

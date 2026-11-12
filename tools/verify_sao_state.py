@@ -6,6 +6,7 @@
 用法：
     .venv\\Scripts\\python.exe tools\\verify_sao_state.py
     .venv\\Scripts\\python.exe tools\\verify_sao_state.py --json
+    .venv\\Scripts\\python.exe tools\\verify_sao_state.py --app-dir E:\\desktopbox\\data
 
 判据（全部来自 .config.json 与磁盘事实，不猜）：
  1. app.data_root 指向 E:\\快捷方式SAO（用户指定的数据根）
@@ -21,6 +22,12 @@
 
 注意第 6 条只校验**合法区间**，不比对具体数值。面板宽度、圆角、颜色、居中/贴合
 都是用户随时会调的东西，工具锁死它们就会"用户一改就红"——那是工具的 bug。
+
+v1.6 部署态适配：APP_DIR 不再写死 ``%USERPROFILE%\\DesktopBox``。解析优先级
+（与产品语义对齐，见 app/paths.py 的 frozen 分支）：
+``--app-dir`` 显式指定 > 环境变量 ``DESKTOPBOX_HOME`` > 部署默认
+``E:\\desktopbox\\data``（存在 .config.json 才认）> 源码态旧目录
+``%USERPROFILE%\\DesktopBox``。
 """
 
 from __future__ import annotations
@@ -50,14 +57,27 @@ from app.config import (  # noqa: E402
 )
 
 HOME = Path(os.environ.get("USERPROFILE", str(Path.home())))
-APP_DIR = HOME / "DesktopBox"
-CONFIG_PATH = APP_DIR / ".config.json"
-ICO_DIR = APP_DIR / ".icons" / "ico"
-STATE_PATH = APP_DIR / ".icons" / "lnk_state.json"
-LAUNCHERS_DIR = APP_DIR / ".launchers"
 EXPECTED_ROOT = r"E:\快捷方式SAO"
+FROZEN_DEFAULT_APP_DIR = Path(r"E:\desktopbox\data")   # v1.6 部署默认（见 docs/deploy.md）
 EXPECTED_DIRS = ["游戏加速", "影音娱乐", "工作学习", "社交通讯", "系统硬件", "文档下载"]
 EXPECTED_EXCLUDE = ["快捷方式", "桌面", "z全部"]
+
+
+def resolve_app_dir(explicit: str | None = None) -> Path:
+    """本工具视角的 APP_DIR（v1.6 起不再写死 C 盘）。
+
+    优先级：``--app-dir`` 显式指定 > 环境变量 ``DESKTOPBOX_HOME`` > 部署默认
+    ``E:\\desktopbox\\data``（必须存在 .config.json 才认，避免在未迁移的机器上
+    误选空目录）> 源码态旧目录 ``%USERPROFILE%\\DesktopBox``。
+    """
+    if explicit:
+        return Path(explicit)
+    env = os.environ.get("DESKTOPBOX_HOME", "").strip()
+    if env:
+        return Path(env)
+    if (FROZEN_DEFAULT_APP_DIR / ".config.json").is_file():
+        return FROZEN_DEFAULT_APP_DIR
+    return HOME / "DesktopBox"
 
 # 面板尺寸上限：app.config 的 clamp_int 里是字面量 4000 / 3000（不是具名常量），
 # 因此这里只能跟随复制；改 app.config 的上限时请同步改这里（下面有断言兜底：
@@ -142,12 +162,20 @@ def real_desktop() -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser(description="DesktopBox v1.4 SAO 接入状态自检（只读）")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    ap.add_argument("--app-dir", default=None,
+                    help="程序私有目录（默认按 DESKTOPBOX_HOME → E:\\desktopbox\\data "
+                         "→ %USERPROFILE%\\DesktopBox 顺序解析）")
     args = ap.parse_args()
+    app_dir = resolve_app_dir(args.app_dir)
+    config_path = app_dir / ".config.json"
+    ico_dir = app_dir / ".icons" / "ico"
+    state_path = app_dir / ".icons" / "lnk_state.json"
+    launchers_dir = app_dir / ".launchers"
 
-    if not CONFIG_PATH.exists():
-        check("配置文件存在", False, str(CONFIG_PATH))
+    if not config_path.exists():
+        check("配置文件存在", False, str(config_path))
         return _finish(args)
-    cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
     app_cfg = cfg.get("app", {})
     cats = cfg.get("categories", [])
 
@@ -174,7 +202,7 @@ def main() -> int:
     # 6-7 逐分类
     for c in cats:
         name, cid = c.get("dir", "?"), c.get("id", "")
-        ico = ICO_DIR / f"{cid}.ico"
+        ico = ico_dir / f"{cid}.ico"
         check(f"{name} · 分类 ICO 存在", ico.exists(), ico.name)
         skin_bad = skin_problems(c)
         check(f"{name} · 外观参数在合法范围内", not skin_bad,
@@ -185,7 +213,7 @@ def main() -> int:
         check(f"{name} · 数据目录存在",
               (Path(EXPECTED_ROOT) / name).is_dir(), str(Path(EXPECTED_ROOT) / name))
 
-        lnk = LAUNCHERS_DIR / f"启动-{name}.lnk"
+        lnk = launchers_dir / f"启动-{name}.lnk"
         exists = lnk.exists()
         check(f"{name} · 启动器 .lnk 存在", exists, lnk.name)
         if exists:
@@ -196,8 +224,8 @@ def main() -> int:
                   (lt.arguments or "").split("main.py")[-1].strip())
 
     # 8 落点状态无桌面残留
-    if STATE_PATH.exists():
-        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    if state_path.exists():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         entries = state.get("categories", state) if isinstance(state, dict) else {}
         if isinstance(entries, dict):
             wheres = sorted({(v or {}).get("where", "") for v in entries.values()})
@@ -205,15 +233,15 @@ def main() -> int:
             unknown = [k for k in entries if k not in {c.get("id") for c in cats}]
             check("落点状态无已注销分类的记录", not unknown, str(unknown))
     else:
-        check("落点状态文件存在", False, str(STATE_PATH))
+        check("落点状态文件存在", False, str(state_path))
 
     # 9 目录无多余文件（多余 = 已注销分类的残留）
     want_lnks = {f"启动-{n}.lnk" for n in EXPECTED_DIRS}
-    got_lnks = {p.name for p in LAUNCHERS_DIR.glob("*.lnk")} if LAUNCHERS_DIR.is_dir() else set()
+    got_lnks = {p.name for p in launchers_dir.glob("*.lnk")} if launchers_dir.is_dir() else set()
     check(".launchers 无多余 .lnk", got_lnks <= want_lnks, str(sorted(got_lnks - want_lnks)))
 
     want_icos = {f"{c.get('id')}.ico" for c in cats if c.get("id")}
-    got_icos = {p.name for p in ICO_DIR.glob("*.ico")} if ICO_DIR.is_dir() else set()
+    got_icos = {p.name for p in ico_dir.glob("*.ico")} if ico_dir.is_dir() else set()
     check(".icons/ico 无多余 .ico", got_icos <= want_icos, str(sorted(got_icos - want_icos)))
 
     # 10 桌面干净

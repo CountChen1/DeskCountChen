@@ -1526,9 +1526,11 @@ B1/B3/B4/B5/B6 五条一起红（面板开出来 0.8s 后已被自己关掉）�
 用户真的走开时，宽限之后还会有失活或外点（`click-outside` / `focus-lost`），
 那才该关 —— B4 用例（静置 0.9s 后外点必关）继续通过。
 
-**验证**：`tests/test_panel_grace.py`（7 个用例）覆盖「宽限内失活 → 面板存活」、
+**验证**：`tests/test_panel_grace.py`（13 个用例）覆盖「宽限内失活 → 面板存活」、
 「宽限后失活 → 正常关闭且原因仍为 `deactivate`」、「作废后不留 self-schedule
-定时器」；QA 黑盒 `tests/qa_v15_verify.py B` 22/22 通过。
+定时器」、「判据用事件发生时刻而非检查时刻」（含 `test_show_resets_deactivate_at`）；
+QA 黑盒 `tests/qa_v15_verify.py B` 23/23 通过（干净窗口连跑 5 次均为 23/23，
+宿主夺前台时的偶发红见 §12.8）。
 
 #### 12.1.1.1 一条方法论教训：**判据不严比测试变红更危险**
 
@@ -1701,7 +1703,7 @@ QScreen.grabWindow(0, 面板区域)      # 只抓面板那一小块（整屏 25�
 | 缩放缓入 | 同上 + 探针 | 149–154ms 完成，fade 0→1，几何回到 100% |
 | 悬停 | 单测 + 探针像素对比 | 进度缓动到位；1.08 缩放；渲染差异 52%；常态/悬停文字色不同 |
 | 全局设置 | `tests/test_apply_all.py`（11 项） | 皮肤字段全同步、身份字段不动、立即落盘、开着的面板被关闭 |
-| 全量单测 | `python -m unittest discover -s tests -t .` | **288 tests OK**（v1.4 215 项 + v1.5 新增 73 项） |
+| 全量单测 | `python -m unittest discover -s tests -t .` | **294 tests OK**（v1.4 215 项 + v1.5 新增 79 项） |
 
 **新增文件**：`app/win32/input_watch.py`、`app/windows/panel_watch.py`、
 `tests/test_panel_watch.py`、`tests/test_panel_appearance.py`、
@@ -1778,7 +1780,7 @@ QScreen.grabWindow(0, 面板区域)      # 只抓面板那一小块（整屏 25�
 | 观察 | 含义 |
 |---|---|
 | 红的只出现在依赖"谁抢到前台"的用例（`open_panel 产出面板`、`B5b`、`B7 1.8s 后存活`），且探针计数 `WindowDeactivate×N` 与"外部进程夺前台"同时出现 | 环境红 |
-| **白盒 `tests/test_panel_grace.py` 的 12 项出现红** | **真回归**（它不依赖真实前台，只构造时间戳） |
+| **白盒 `tests/test_panel_grace.py` 的 13 项出现红** | **真回归**（它不依赖真实前台，只构造时间戳） |
 | 红的伴随 `close_reason='deactivate'` 但失活事件发生在宽限内 | 真回归（判据用错了时刻，见 §12.1.1.1 第 4 条） |
 | `qa_probe_grace_boundary.py` 出现红 | 真回归（它精确构造"失活在宽限内、复核在宽限外"，不依赖外点时机） |
 

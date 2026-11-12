@@ -820,6 +820,29 @@ EXPECTED_RED = {
     "--mutant-deadobj": {"流程"},
     "--mutant-nograce": {"①", "②", "③", "流程"},
 }
+# 全部用例键（与 case_key 的映射一一对应）。横幅的「必须绿」= 全集 − 预期红，
+# 同样是投影，不许手写 —— 否则把某项塞回预期红时，横幅不会跟着改（ac61efc 之前的
+# nograce 横幅「预期红 ①②③④」就是手抄副本漂移的实例）。
+ALL_CASE_KEYS = ("①", "②", "③", "④", "流程", "重置")
+# 键 → 展示名。只影响横幅/汇总的可读性，不影响任何比较逻辑。
+CASE_LABEL = {"流程": "流程(连坐)", "重置": "重置(复用)"}
+
+
+def _banner_expected_red(mode: str) -> str:
+    """横幅里的「预期红」必须从 EXPECTED_RED[mode] 投影生成，不许手抄。
+
+    同一个事实（预期红）在探针里有三个出口：数据结构（EXPECTED_RED）、判词（detail）、
+    横幅（main() 的 print）。前两个"被人读"，第三个"自己往屏幕上写" —— 手抄副本一旦
+    漂移，会以"实测证据"的样子被读走。投影之后，"横幅与期望集矛盾"在结构上不可能发生。
+    只投影集合；"为什么某些项该绿"的理由留在 SELF_CHECK_NOTE，不进横幅。
+    """
+    return "+".join(CASE_LABEL.get(k, k) for k in sorted(EXPECTED_RED[mode]))
+
+
+def _banner_must_be_green(mode: str) -> str:
+    """横幅里的「必须绿」= 全集 − 预期红，同为投影。"""
+    green = sorted(set(ALL_CASE_KEYS) - EXPECTED_RED[mode])
+    return " 与 ".join(CASE_LABEL.get(k, k) for k in green)
 # 这几组的红还必须**指名是哪道防线接住的**
 EXPECTED_CAUGHT_BY = {
     "--mutant-collateral": "caught_by=gate",
@@ -933,31 +956,35 @@ def main() -> int:
     if mutant:
         install_mutant_patch()
         print("=" * 70)
-        print("!!! mutant：判定基准退回「检查时刻」—— 预期红 ②③ + 流程(连坐)"
-              "（① 实测 66~88ms、+120ms 复核 186~208ms，未越 300ms，按 180ms 阈值不该红）")
+        print(f"!!! mutant：判定基准退回「检查时刻」—— 预期红 {_banner_expected_red('--mutant')}"
+              "；预期绿的项与理由见运行末尾 [SELF-CHECK]（不在此处复写）")
         print("=" * 70)
     if mutant_reset:
         install_mutant_reset_patch()
         print("=" * 70)
-        print("!!! mutant-reset：showEvent 不再重置 _deactivate_at —— 只有 重置(复用) 该红")
+        print(f"!!! mutant-reset：showEvent 不再重置 _deactivate_at —— "
+              f"预期红 {_banner_expected_red('--mutant-reset')}")
         print("=" * 70)
     if mutant_collateral:
         install_fault_mode("collateral")
         print("=" * 70)
         print(f"!!! mutant-collateral：静置期第 {FAULT_DELAY_MS}ms close_panel() 掉第二块"
-              " —— 流程(连坐) 必须 FAIL 且 caught_by=gate")
+              f" —— 预期红 {_banner_expected_red('--mutant-collateral')}"
+              f"，且必须 {EXPECTED_CAUGHT_BY['--mutant-collateral']}")
         print("=" * 70)
     if mutant_deadobj:
         install_fault_mode("deadobj")
         print("=" * 70)
         print(f"!!! mutant-deadobj：静置期第 {FAULT_DELAY_MS}ms 只 deleteLater（不动 controller.panel）"
-              " —— 必须 FAIL 且 caught_by=except（有汇总行、不崩）")
+              f" —— 预期红 {_banner_expected_red('--mutant-deadobj')}"
+              f"，且必须 {EXPECTED_CAUGHT_BY['--mutant-deadobj']}（有汇总行、不崩）")
         print("=" * 70)
     if mutant_nograce:
         install_mutant_nograce_patch()
         print("=" * 70)
-        print("!!! mutant-nograce：产品 SHOW_GRACE_S 打成 0（宽限消失）—— "
-              "预期红 ①②③ + 流程(连坐)；④ 与 重置(复用) 必须绿")
+        print(f"!!! mutant-nograce：产品 SHOW_GRACE_S 打成 0（宽限消失）—— "
+              f"预期红 {_banner_expected_red('--mutant-nograce')}；"
+              f"{_banner_must_be_green('--mutant-nograce')} 必须绿")
         print("=" * 70)
 
     seed()

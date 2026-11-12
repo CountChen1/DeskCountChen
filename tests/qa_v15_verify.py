@@ -376,6 +376,7 @@ def find_blank_viewport_point(pw) -> QPoint | None:
 
 LAST_OPEN_ACTIVE = False      # 最近一次 open_panel 是否真的让面板拿到了激活
 LAST_PANEL = None             # 最近一次 open_panel 产出的面板（关闭后仍可读 close_reason）
+CLOSE_LOG: list = []          # [(面板, 关闭原因, 关闭瞬间的前台 pid)]
 
 
 def open_panel(app, controller, cat_id: str, settle: float = 0.8):
@@ -450,17 +451,50 @@ def install_deactivate_spy() -> None:
 
 
 def closed_by_external_foreground(pw) -> bool:
-    """面板被 ``deactivate`` 关掉，且**当时**前台由别的进程持有。
+    """面板被 ``deactivate`` 关掉，且**关闭那一瞬间**前台由别的进程持有。
 
     这种关闭是**正确行为** —— 确实有别的窗口把前台拿走了（用户切走、或者同机
     另一个测试进程在跑 Qt 用例），产品照设计关面板。但它让"面板应存活"这类
     用例的前提不成立，所以应当记 SKIP 而不是 FAIL。
 
-    实测背景：同一台机器上并行跑两个 GUI 测试套件时，B1/B2/B7 会成片报
-    `reason='deactivate'` —— 不是产品退化，是两边互相抢前台。
+    ## 为什么必须在 close_with_reason 里记，而不是事后查
+
+    第一版是事后查 ``GetForegroundWindow()`` 的归属，结果踩了一个竞态：
+    外部进程夺走前台 → 面板关闭 → 等我们检查时前台**已经换回本进程的另一个
+    窗口** → 判成"不是外部的" → 记 FAIL。实测出现过一次
+    ``B2 open_panel 产出面板 (controller.panel is None（已拿到激活仍被关闭）)``，
+    而同一轮的 B1 明明 SKIP 到了 ``pid=13936``。
+
+    关掉那一刻的归属是唯一不会漂的证据，所以就记在那一刻。
     """
+    record = _close_record_for(pw)
+    if record is not None:
+        reason, pid = record
+        return reason == PW.REASON_DEACTIVATE and pid not in (0, os.getpid())
+    # 没有记录（例如面板不是经 close_with_reason 关的）→ 退回事后判定
     return (safe_reason(pw) == PW.REASON_DEACTIVATE
             and foreground_stolen_externally())
+
+
+def _close_record_for(pw):
+    for panel, reason, pid in reversed(CLOSE_LOG):
+        if panel is pw:
+            return reason, pid
+    return None
+
+
+def install_close_observer() -> None:
+    """记录每次 ``close_with_reason`` 的「原因 + 那一刻的前台进程」。
+
+    只做记录再原样转调，不改变产品行为。
+    """
+    original = PW.PanelWindow.close_with_reason
+
+    def close_with_reason(self, reason):        # noqa: ANN001
+        CLOSE_LOG.append((self, str(reason), foreground_owner_pid()))
+        return original(self, reason)
+
+    PW.PanelWindow.close_with_reason = close_with_reason      # type: ignore[method-assign]
 
 
 def require_panel(name: str, pw, needs_active: bool = False) -> bool:
@@ -1014,8 +1048,12 @@ def b7_rapid_switch(app, controller, cat_ids) -> None:
     # 新面板必须能活过自己的 300ms 宽限期 + 动画
     pump(app, 0.8)
     verdict("B7 新面板在 1.8s 后仍存活（没有自我关闭）", panel_alive(controller),
-            f"panel={'存活' if panel_alive(controller) else 'None(自我关闭)'}",
-            env_ok=active_ok)
+            f"panel={'存活' if panel_alive(controller) else 'None(自我关闭)'}"
+            f" reason={safe_reason(new)!r}",
+            # env_ok 必须**在这一刻**重算：开盘时 active_ok 为真，但 1.8s 里
+            # 前台可能被别的进程夺走、面板按 deactivate 正常关闭 —— 那是环境，
+            # 不是"新面板被旧面板连坐"。只看开盘时的状态会把这种关闭记成 FAIL。
+            env_ok=active_ok and not closed_by_external_foreground(new))
     controller.close_panel()
     pump(app, 0.35)
 
@@ -1416,6 +1454,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setQuitOnLastWindowClosed(False)
     QApplication.setStartDragDistance(4)
     install_deactivate_spy()
+    install_close_observer()
     controller = AppController(app)
     controller.start()
     pump(app, 1.0)

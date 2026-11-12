@@ -20,7 +20,7 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
 
 | 用例 | 场景 | 正确行为 |
 |---|---|---|
-| ① / ② / ③ | 失活落在宽限内（100 / 200 / 280ms） | 作废，面板存活 |
+| ① / ② / ③ | 失活落在宽限内（60 / 200 / 280ms） | 作废，面板存活 |
 | ④ | 失活在宽限之后（420ms） | 判死，面板关闭且 reason=deactivate |
 | 流程(连坐) | 连开两块面板 | 第二块不被第一块连坐、拿到干净的宽限起点 |
 | 重置(复用) | **同一对象** show 两次 | ``showEvent`` 必须把 ``_deactivate_at`` 清回 0.0 |
@@ -40,7 +40,7 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
 
 ``open_panel`` 之后到第一次 pump 之间，**面板首帧绘制（毛玻璃 ``grabWindow`` +
 首次字体/管线初始化）能把主线程堵约 250ms**。实测：① 作为第一条用例时，
-目标注入 100ms，实际漂到 **358ms** —— 场景根本没落在"宽限内"，用例却按
+目标注入 100ms（**现为 60ms**），实际漂到 **358ms** —— 场景根本没落在"宽限内"，用例却按
 ``expect_alive=True`` 断言存活，于是把**产品的正确行为判成了红**。
 
 三条对策：
@@ -51,9 +51,21 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
 3. 3 次仍漂 → ``skip()``，理由写明实测漂到多少，**不记 PASS 也不记 FAIL**。
 
 判"漂"的判据是**落错侧**（``expect_alive`` 却实测 ``>= GRACE_MS``）**或严重偏离目标**
-（``> fire_at +100ms``），**不是**"距边界不足 20ms"：③ 的目标就是 280ms，用 20ms 余量
+（``> fire_at +GROSS_DRIFT_MS``），**不是**"距边界不足 20ms"：③ 的目标就是 280ms，用 20ms 余量
 会让它永远判漂、永远 SKIP —— 等于为了修 ① 把最贴边界的用例删掉。实测依据：那样跑
 ③ 三次实测 282ms 全被判漂。
+
+## ① 的事件时刻有 ~115ms 地板（下调目标压不下去）
+
+每块面板都是新实例，``open_panel`` 之后**第一次 ``processEvents()`` 本身就要 ~115ms**
+（新实例的首帧；预热只预热了字体/管线，预热不了"下一块新面板"）。所以：
+
+- ① 目标 100ms → 实测事件 102～139ms；① 目标 60ms → 实测 **116 / 122 / 131ms**；
+- 把目标往下调**不会**让事件更早发生，只会让"偏离目标"更容易被判漂（因此
+  ``GROSS_DRIFT_MS`` 从 100 提到 140，保住原来 200ms 的绝对窗口）。
+
+对 180ms 误判线的余量因此固定在大约 **50～64ms**，这是结构性的，改目标值解决不了。
+``--mutant`` 下若 ① 真漂过 180ms，会报"多红 [①] → exit 2" —— 那是漂移，不是缺陷。
 
 ## 死对象守卫（两道，各自都要能单独审）
 
@@ -93,13 +105,38 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
 | ``--mutant-reset``（showEvent 不重置） | 绿 | 绿 | 绿 | **红** |
 | ``--mutant-collateral``（静置期 ``close_panel`` 掉第二块） | 绿 | 绿 | **红**(caught_by=gate) | 绿 |
 | ``--mutant-deadobj``（只 ``deleteLater``：wrapper 活、C++ 已死） | 绿 | 绿 | **红**(caught_by=except) | 绿 |
+| ``--mutant-nograce``（产品 ``SHOW_GRACE_S = 0``：宽限消失） | **红** | **红** | **红** | 绿△ |
 
 ※ ``--mutant`` 下 ① 是绿的，**这是对的**：mutant 只在"检查时刻"越过 300ms 时才发作，
-① 实测注入 ~105ms、检查 ~225ms，还没越过边界。误判阈值是 ``event >= 180ms``，
-① 低于阈值，按理论不该红。②③ 与流程(连坐) 的注入都在 180ms 以上，所以红。
+而检查时刻 = 事件时刻 + ``CLOSE_DELAY_MS``(120)，所以只有 ``事件 >= 180ms`` 才会误判。
+① 实测事件 **116～131ms**（目标 60ms，地板 ~115ms），检查 236～251ms，**离 300ms 还有 49ms 以上**，
+mutant 在这里与正确实现**必然同结论** —— 它绿不代表它没测宽限，代表 mutant 的作用点
+不在 ① 的区间。②（203→323ms）③（282→402ms）在 180ms 以上，所以红。
+
+△ ``--mutant-nograce`` 下 ``重置(复用)`` **必须绿，而且这个绿是有意义的**：它只测
+``showEvent`` 有没有把 ``_deactivate_at`` 清回 ``0.0``，**全程不经过 ``_check_deactivate``**，
+与宽限常量无关。它要是红了，说明 mutant 打错了对象（或重置断言被别的东西污染），
+不是"宽限"这件事有问题。
+
+``--mutant-nograce`` 是 ① 的**隔离自证**：① 在 ``--mutant`` 下天然红不了（见 ※），
+没有这一条，"① 的断言能不能被证伪"就只存在于一次性的树外实验里，**封版后不可复核**。
+它的红一半来自断言本身（①② 在自己的检查时刻判死），一半来自早死闸（③④ 与 流程 在
+注入前就已被关掉），但**每条都落在自己的键上**，集合相等照样成立。
 
 后两行是两道死对象防线的**隔离自证**：按 §11.4.1，每道防线都要有"只放行它"的用例，
 否则一道失效会被另一道替它扛，看起来全绿其实早废了。
+
+## 退出码契约
+
+| 码 | 含义 | 判据 |
+|---|---|---|
+| 0 | 全绿 | 无 FAIL、无 SKIP，且（mutant 模式下）失败集合**恰好等于**预期集合 |
+| 1 | FAIL | 正常模式下有失败项 —— 产品缺陷 |
+| 2 | 探针不可信 | 未知参数 / mutant 互斥冲突 / 自检少红多红 / `caught_by` 没指名 |
+| 3 | **没验到** | 有任何 SKIP —— **一条跳过的门禁不是门禁**，不能算"这轮过了" |
+
+优先级：正常模式下 ``1 > 3 > 0``；mutant 模式下 ``2 > 3 > 0``（2 比 3 更严重：
+自证本身坏了，连"没验到"这句话都不可信）。**任何 SKIP 都绝不会以 0 退出。**
 
 用法：
     .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py
@@ -107,6 +144,7 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
     .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py --mutant-reset
     .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py --mutant-collateral
     .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py --mutant-deadobj
+    .venv\\Scripts\\python.exe tests\\qa_probe_grace_boundary.py --mutant-nograce
 """
 from __future__ import annotations
 
@@ -133,7 +171,12 @@ from app.windows.panel_window import (  # noqa: E402
 )
 
 GRACE_MS = 300                     # panel_watch.GRACE_MS
-GROSS_DRIFT_MS = 100               # 实测事件时刻偏离目标超过这个量 → 判漂、重试
+# 实测事件时刻偏离**目标**超过这个量 → 判漂、重试。
+# 从 100 提到 140 是因为 ① 的目标从 100ms 下调到 60ms：① 的实测事件时刻有 ~115ms 的地板
+# （每块新面板首帧的第一次 processEvents 就要 ~115ms，预热只能预热字体/管线，预不了新实例），
+# 若沿用 100 的绝对窗口，① 的丢弃阈值会从 200ms 掉到 160ms —— 地板就贴着 115ms，
+# 于是"下调目标"反而变成"更容易被判漂 → SKIP → exit 3"。200ms 的绝对窗口保持不变。
+GROSS_DRIFT_MS = 140
 MAX_ATTEMPTS = 3                   # 漂移重试次数上限
 FAULT_DELAY_MS = 100               # 故障注入：静置期第几毫秒动手
 
@@ -278,8 +321,17 @@ def gate_alive(name: str, controller, pw, elapsed_ms: float, hint: str = "") -> 
     if controller.panel is pw:
         return True
     reason = safe_reason(pw) or "（对象已删除，读不到 close_reason）"
+    # 面板最后的**失活事件时刻**也要印出来：只有"什么时候死的"才能把
+    # "被外部抢前台连坐"和"被同一缺陷误判"分开。纯 Python 属性，死对象上也读得到。
+    ev_ms = (deactivate_at(pw) - shown_at(pw)) * 1000.0 if deactivate_at(pw) > 0 else -1.0
+    if 0 <= ev_ms < GRACE_MS:
+        ev_txt = f"最近失活事件@{ev_ms:.0f}ms（宽限内，本应作废）"
+    elif ev_ms >= GRACE_MS:
+        ev_txt = f"最近失活事件@{ev_ms:.0f}ms（宽限外）"
+    else:
+        ev_txt = "最近失活事件时刻读不到"
     check(name, False,
-          f"面板在注入前已不在（检查时刻 {elapsed_ms:.0f}ms）reason={reason}"
+          f"面板在注入前已不在（检查时刻 {elapsed_ms:.0f}ms，{ev_txt}）reason={reason}"
           f" caught_by=gate {hint}".rstrip())
     return False
 
@@ -608,7 +660,9 @@ def install_mutant_patch() -> None:
     """把判定基准退回"检查时刻"。
 
     这个 mutant 就是产品原本那个缺陷（用 ``time.monotonic() - _shown_at`` 判宽限），
-    只是被挪到 monkeypatch 里、不碰 ``app/`` 源码。此时 ①②③ + 流程(连坐) **必须红**。
+    只是被挪到 monkeypatch 里、不碰 ``app/`` 源码。此时 **②③ + 流程(连坐)** 必须红；
+    ①（实测 116～131ms）**不该红** —— 它离 180ms 误判线还有 49ms 以上，mutant 在那里
+    与正确实现同结论。① 的可证伪性由 ``--mutant-nograce`` 负责。
     """
     from app.windows import panel_window as PW
 
@@ -649,6 +703,29 @@ def install_mutant_reset_patch() -> None:
     PW.PanelWindow.showEvent = show_event           # type: ignore[method-assign]
 
 
+def install_mutant_nograce_patch() -> None:
+    """把**产品的**开场宽限打成 0，验证 ①②③④ 的断言可被证伪。
+
+    ## 打的对象必须是产品模块里那个常量
+
+    ``app/windows/panel_window.py`` 里 ``_check_deactivate`` 读的是模块级
+    ``SHOW_GRACE_S``（``elapsed_ms < SHOW_GRACE_S * 1000.0`` 那一行），运行期按全局名查找，
+    所以改 ``panel_window.SHOW_GRACE_S`` 才真的把产品行为改成"没有开场宽限"。
+
+    **绝不能打探针自己的 ``GRACE_MS``** —— 那只改判词和漂移判据，产品行为不变，
+    等于自己验自己：红不红全看探针的排版，与产品无关。
+
+    ## 为什么这条是 ① 的隔离自证
+
+    ``--mutant``（判据退回检查时刻）只在 ``事件 >= 180ms`` 时发作，而 ① 落在 116～131ms，
+    在那里两种实现**必然同结论** —— ① 在 ``--mutant`` 下天然红不了。没有这条 mutant，
+    "① 的断言到底能不能红"就只存在于一次性的树外实验里，封版后无法复核。
+    """
+    from app.windows import panel_window as PW
+
+    PW.SHOW_GRACE_S = 0.0
+
+
 def install_fault_mode(mode: str) -> None:
     """把故障注入模式挂上（**不 patch 产品、不 patch 闸门**）。
 
@@ -677,6 +754,7 @@ MUTANT_ARGS = {
     "--mutant-reset": "showEvent 不再重置 _deactivate_at",
     "--mutant-collateral": "静置期把第二块 close_panel 掉",
     "--mutant-deadobj": "静置期只 deleteLater，不动 controller.panel",
+    "--mutant-nograce": "产品 SHOW_GRACE_S 打成 0（宽限消失）",
 }
 KNOWN_ARGS = tuple(MUTANT_ARGS) + ()
 
@@ -686,11 +764,20 @@ EXPECTED_RED = {
     "--mutant-reset": {"重置"},
     "--mutant-collateral": {"流程"},
     "--mutant-deadobj": {"流程"},
+    "--mutant-nograce": {"①", "②", "③", "④", "流程"},
 }
 # 这几组的红还必须**指名是哪道防线接住的**
 EXPECTED_CAUGHT_BY = {
     "--mutant-collateral": "caught_by=gate",
     "--mutant-deadobj": "caught_by=except",
+}
+# 自检通过时要说明**为什么某些项是绿的** —— 不让"恰好绿"混进来
+SELF_CHECK_NOTE = {
+    "--mutant": "① 绿是算术必然：mutant 只发作于 事件>=180ms，① 实测 116~131ms，"
+                "检查 236~251ms 离 300ms 还有 49ms 以上，两种实现同结论。",
+    "--mutant-nograce": "重置(复用) 绿是对的：它只测 showEvent 把 _deactivate_at 清回 0.0，"
+                        "全程不经过 _check_deactivate，与宽限常量无关；它若红了说明 mutant "
+                        "打错了对象。",
 }
 
 
@@ -760,8 +847,11 @@ def run_self_check(active: str) -> int:
             print(f"[SELF-CHECK] 缺 {marker} → 红的原因不是预期的那个，证据无效")
             ok = False
     print("[SELF-CHECK] 通过" if ok else "[SELF-CHECK] 失效")
+    note = SELF_CHECK_NOTE.get(active)
+    if note and ok:
+        print(f"[SELF-CHECK] 说明：{note}")
     if SKIPS:
-        print(f"[SELF-CHECK] 注意：本轮有 {len(SKIPS)} 项环境跳过，集合比对可能不完整")
+        print(f"[SELF-CHECK] 注意：本轮有 {len(SKIPS)} 项跳过，集合比对不完整（不判通过）")
     return 0 if ok else 2
 
 
@@ -773,12 +863,13 @@ def main() -> int:
     mutant_reset = "--mutant-reset" in argv
     mutant_collateral = "--mutant-collateral" in argv
     mutant_deadobj = "--mutant-deadobj" in argv
+    mutant_nograce = "--mutant-nograce" in argv
 
     if mutant:
         install_mutant_patch()
         print("=" * 70)
         print("!!! mutant：判定基准退回「检查时刻」—— 预期红 ②③ + 流程(连坐)"
-              "（① 注入 ~105ms、检查 ~225ms 未越 300ms，按 180ms 阈值不该红）")
+              "（① 目标 60ms、实测 116~131ms，检查 236~251ms 未越 300ms，按 180ms 阈值不该红）")
         print("=" * 70)
     if mutant_reset:
         install_mutant_reset_patch()
@@ -797,6 +888,12 @@ def main() -> int:
         print(f"!!! mutant-deadobj：静置期第 {FAULT_DELAY_MS}ms 只 deleteLater（不动 controller.panel）"
               " —— 必须 FAIL 且 caught_by=except（有汇总行、不崩）")
         print("=" * 70)
+    if mutant_nograce:
+        install_mutant_nograce_patch()
+        print("=" * 70)
+        print("!!! mutant-nograce：产品 SHOW_GRACE_S 打成 0（宽限消失）—— "
+              "预期红 ①②③④ + 流程(连坐)；重置(复用) 必须绿（它不经过 _check_deactivate）")
+        print("=" * 70)
 
     seed()
     app = QApplication(sys.argv[:1])
@@ -806,12 +903,21 @@ def main() -> int:
     controller.start()
     pump(app, 1.0)
 
-    print(f"宽限 {GRACE_MS}ms，复核延迟 {CLOSE_DELAY_MS}ms → "
-          f"误判阈值 deactivate_at >= {GRACE_MS - CLOSE_DELAY_MS}ms；"
-          f"漂移判据：落错侧 或 偏离目标>={GROSS_DRIFT_MS}ms\n")
+    if mutant_nograce:
+        # 探针自己的口径不变（漂移判据仍按 GRACE_MS），但产品侧的宽限已经是 0 ——
+        # 这行必须说实话，否则"宽限 300ms"会被当成实测环境读走。
+        print(f"宽限 0ms（产品 SHOW_GRACE_S 已被 mutant 置 0；探针判据仍按 {GRACE_MS}ms，"
+              f"所以窗口标签与实测数字不受影响），复核延迟 {CLOSE_DELAY_MS}ms → "
+              f"任何失活都会判死\n")
+    else:
+        print(f"宽限 {GRACE_MS}ms，复核延迟 {CLOSE_DELAY_MS}ms → "
+              f"误判阈值 deactivate_at >= {GRACE_MS - CLOSE_DELAY_MS}ms；"
+              f"漂移判据：落错侧 或 偏离目标>={GROSS_DRIFT_MS}ms\n")
 
     warmup(app, controller)          # 首帧绘制开销不落在计时窗口里
-    case(app, controller, "① ", 100, expect_alive=True)
+    # ① 目标 60ms：对 180ms 误判线留 ~100ms 余量（原先 100ms 只留 41~78ms，
+    #    机器一慢就会漂到 180ms 以上，在 --mutant 下报"多红 [①]"的假警报）。
+    case(app, controller, "① ", 60, expect_alive=True)
     case(app, controller, "② ", 200, expect_alive=True)
     case(app, controller, "③ ", 280, expect_alive=True)
     case(app, controller, "④ ", 420, expect_alive=False)
@@ -836,13 +942,24 @@ def main() -> int:
         shutil.rmtree(root, ignore_errors=True)
 
     active = next((a for a in MUTANT_ARGS if a in argv), None)
+    code = 0
     if active is not None:
         print("\n" + "=" * 70)
         code = run_self_check(active)
         print("=" * 70)
-        return code
+    elif failed:
+        code = 1
 
-    return 0 if not failed else 1
+    # —— 退出码 3：没验到。一条跳过的门禁不是门禁 ——
+    # 优先级：正常模式 1 > 3 > 0；mutant 模式 2 > 3 > 0（自证本身坏了比"没验到"更严重，
+    # 因为那时连"没验到"这句话都不可信）。任何 SKIP 都不会以 0 退出。
+    if SKIPS:
+        print(f"\n[INCOMPLETE] 跳过 {len(SKIPS)} 项，本次运行不算通过：")
+        for n, why in SKIPS:
+            print(f"  - {n}（{why}）")
+        if code == 0:
+            code = 3
+    return code
 
 
 if __name__ == "__main__":

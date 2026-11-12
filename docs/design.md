@@ -1825,6 +1825,9 @@ QScreen.grabWindow(0, 面板区域)      # 只抓面板那一小块（整屏 25�
 > **判据：只要没有汇总行，就按 FAIL 对待，不许当环境噪音重跑。**
 > 一个在该 FAIL 时会崩的门禁，等于没有门禁，还带副作用 —— 它会把真实的回归
 > 伪装成基础设施故障，让人重跑一次就"消失"了。
+>
+> 并且**必须印出 `caught_by=`**：「被抓到了」和「被**哪一道**防线抓到」是两件事，
+> 后者才证明防线之间没有互相遮蔽。
 
 为什么会这样，值得记一笔：`_deactivate_at` 是**纯 Python 属性**，shiboken 的
 "对象已删除"检查只挂在 **C++ 调用**上。所以面板被销毁之后，`getattr(pw, "_deactivate_at")`
@@ -1837,6 +1840,18 @@ QScreen.grabWindow(0, 面板区域)      # 只抓面板那一小块（整屏 25�
 - 守卫**不要**用 `isVisible()`（C++ 调用，在已销毁对象上会抛），用 `controller.panel is pw`；
 - 只加前置闸不够，`sendEvent` 外面还要挡住 `RuntimeError` 并判 **FAIL**。但按 §11.4.1，
   **这两道防线必须各有"只放行它"的隔离用例** —— 否则一道失效、另一道替它扛，就是多防线假绿。
+
+**`caught_by` 必须分三值**，否则不同 mutant 会撞在同一道闸上，看起来"都抓到了"：
+
+| 触发形态 | 面板状态 | 接住它的 | 期望 `caught_by=` |
+|---|---|---|---|
+| 第二块被 `close_with_reason` 关掉（连坐 mutant） | `controller.panel` 变成 `None` | 早死闸 | `gate` |
+| 自然路径：`controller.panel` 已不是 `pw` | 引用已换 | 守卫 | `guard` |
+| `deleteLater()` 后 C++ 已销毁、Python wrapper 仍活 | `controller.panel is pw` 仍为 `True`（闸过不去） | `sendEvent` 的 `RuntimeError` | `except` |
+
+第二行和第三行是**同一条防线链上的两个不同位置**，必须能分辨：`guard` 证明的是
+"`controller.panel` 与 `pw` 的引用比对有效"，`except` 证明的是"C++ 已销毁时还有兜底"。
+两者合成一个值，就等于其中一道**从未被验证过**。
 
 **处置**：不要为了消红去放宽 B 段断言或加 `SKIP`。已经做的两件事是把红
 **正确归类**——`SKIP` 计入统计（`PASS` 不计）、并在判词里点名 pid 与原因；

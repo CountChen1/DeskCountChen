@@ -12,6 +12,15 @@ v1.4 概念拆分（桌面入口改由 SAO Utils 2 的 HUD 图标承担）：
   ``.config.json`` 的 ``app.data_root`` 指定，``main.py`` 在创建 controller 之前
   调用 :func:`set_data_root` 注入。
 
+v1.6 部署态（PyInstaller frozen）：
+
+- 源码运行态行为**完全不变**（``%USERPROFILE%\\DesktopBox``）；
+- frozen（onedir 打包）态：``APP_DIR = <部署根>\\data``。部署根 = exe 所在目录
+  的上一级（``E:\\desktopbox\\DesktopBox\\DesktopBox.exe`` → ``E:\\desktopbox\\data``），
+  即"程序与数据放一起、整个 E:\\desktopbox 目录拷走即分享"；
+- 环境变量 ``DESKTOPBOX_HOME``（仅在 frozen 态生效）指向完整的程序私有目录，
+  设置后**优先于**上述默认值——这是换盘 / 多实例场景的逃生门。
+
 本模块**不读配置**（避免 config ↔ paths 循环依赖），只负责记住并确保目录存在。
 
 兼容：``paths.ROOT`` 仍可用，等价于 ``paths.DATA_ROOT``（过渡别名，
@@ -22,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -29,8 +39,60 @@ logger = logging.getLogger(__name__)
 # 项目根目录（app 包的上一级：main.py / run.bat 所在处）
 APP_ROOT: Path = Path(__file__).resolve().parents[1]
 
-# 程序私有目录：%USERPROFILE%\DesktopBox（**永不随数据根漂移**）
-APP_DIR: Path = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "DesktopBox"
+
+def resolve_app_dir(
+    frozen: bool,
+    exe_path: str,
+    desktopbox_home: str | None = None,
+    userprofile: str | None = None,
+) -> Path:
+    """程序私有目录 APP_DIR 的解析规则（纯函数，便于单测）。
+
+    Args:
+        frozen: 是否处于 PyInstaller 打包态（``sys.frozen``）。
+        exe_path: 入口可执行文件路径。源码态 = 解释器路径（仅用于保持签名
+            一致，不参与源码态解析）；frozen 态 = DesktopBox.exe 路径。
+        desktopbox_home: 环境变量 ``DESKTOPBOX_HOME``（None/空白 = 未设置）。
+        userprofile: 环境变量 ``USERPROFILE``（None = 回落 ``Path.home()``）。
+
+    Returns:
+        APP_DIR 绝对路径。
+
+    frozen 态布局说明：PyInstaller onedir 产物是
+    ``<部署根>\\<应用目录>\\DesktopBox.exe``（``_internal\\`` 与 exe 同级），
+    因此 APP_DIR = ``exe.parent.parent / "data"``。**刻意不向上无限爬**：
+    若 exe 被放进更深层目录（例如误拷进 ``.venv\\Scripts\\``），parent.parent
+    只是"就近猜一个 data 根"，宁可猜错也不把数据写进盘根或系统目录；
+    真正需要自定义位置的场景请用 ``DESKTOPBOX_HOME``。
+    """
+    if frozen:
+        env = str(desktopbox_home or "").strip()
+        if env:
+            return Path(env)
+        exe = Path(exe_path).resolve()
+        return exe.parent.parent / "data"
+    base = Path(userprofile) if userprofile else Path.home()
+    return base / "DesktopBox"
+
+
+def _default_app_dir() -> Path:
+    """按当前运行形态解析 APP_DIR（导入时求值一次）。"""
+    if getattr(sys, "frozen", False):
+        return resolve_app_dir(
+            frozen=True,
+            exe_path=str(sys.executable),
+            desktopbox_home=os.environ.get("DESKTOPBOX_HOME"),
+        )
+    return resolve_app_dir(
+        frozen=False,
+        exe_path=str(sys.executable),
+        userprofile=os.environ.get("USERPROFILE"),
+    )
+
+
+# 程序私有目录：源码态 = %USERPROFILE%\DesktopBox；frozen 态 = <部署根>\data
+# （**永不随数据根漂移**）
+APP_DIR: Path = _default_app_dir()
 
 # 分类数据根：默认 = APP_DIR；可由 set_data_root() 改写（例如 E:\快捷方式SAO）
 DATA_ROOT: Path = APP_DIR

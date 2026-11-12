@@ -75,7 +75,7 @@ B3 真实注入的失活落在 62～190ms，正好骑在线上，所以时红时
 | 正常 | 绿 | 绿 | 绿 | 绿 |
 | ``--mutant``（判据退回检查时刻） | 绿※ | 绿 | **红** | 绿 |
 | ``--mutant-reset``（showEvent 不重置） | 绿 | 绿 | 绿 | **红** |
-| ``--mutant-deadobj``（第二块在静置期被关掉） | 绿 | 绿 | **红**(caught_by=guard) | 绿 |
+| ``--mutant-deadobj``（第二块在静置期被关掉） | 绿 | 绿 | **红**(caught_by=gate) | 绿 |
 | ``--mutant-deadobj-except``（守卫失效 + 对象被删） | 绿 | 绿 | **红**(caught_by=except) | 绿 |
 
 ※ ``--mutant`` 下 ① 是绿的，**这是对的**：mutant 只在"检查时刻"越过 300ms 时才发作，
@@ -264,7 +264,7 @@ def gate_alive(name: str, controller, pw, elapsed_ms: float, hint: str = "") -> 
     reason = safe_reason(pw) or "（对象已删除，读不到 close_reason）"
     check(name, False,
           f"面板在 {elapsed_ms:.0f}ms 就被关闭 reason={reason}"
-          f" caught_by=guard {hint}".rstrip())
+          f" caught_by=gate {hint}".rstrip())
     return False
 
 
@@ -414,7 +414,7 @@ def case_flow(app, controller) -> None:
     ``test_show_resets_deactivate_at`` 守。
 
     本条真正覆盖的是**生命周期**：第二块在静置期被关掉（连坐）时，必须报 **FAIL**，
-    不许落成 SKIP。自证见 ``--mutant-deadobj``（caught_by=guard）。
+    不许落成 SKIP。自证见 ``--mutant-deadobj``（caught_by=gate）。
     """
     # 第一轮：宽限内失活（应被作废，面板存活）
     controller.open_panel("c0")
@@ -597,7 +597,7 @@ def install_mutant_deadobj(mode: str) -> None:
     """死对象防线的隔离自证。
 
     - ``mode="guard"``：静置期把第二块关掉 → **(d) 早死闸**必须接住
-      （``caught_by=guard``）；
+      （``caught_by=gate``）；
     - ``mode="except"``：同上，但**先把守卫打掉**（模拟"守卫失效"），
       → 只能由 **(e) sendEvent 的 except** 接住（``caught_by=except``）。
 
@@ -639,7 +639,7 @@ def main() -> int:
         install_mutant_deadobj("guard")
         print("=" * 70)
         print(f"!!! mutant-deadobj：静置期第 {DEADOBJ_DELAY_MS}ms 把第二块关掉"
-              " —— 流程(连坐) 必须 FAIL 且 caught_by=guard")
+              " —— 流程(连坐) 必须 FAIL 且 caught_by=gate")
         print("=" * 70)
     if mutant_deadobj_except:
         install_mutant_deadobj("except")
@@ -704,7 +704,7 @@ def main() -> int:
             # 它不以 FLOW_LABEL 开头。按全名匹配会导致自证永远"失效"（假红）。
             details = [d for n, ok, d in RESULTS
                        if n.startswith("流程(连坐)") and not ok]
-            want = "caught_by=guard" if mutant_deadobj else "caught_by=except"
+            want = "caught_by=gate" if mutant_deadobj else "caught_by=except"
             hit = [d for d in details if want in d]
             if hit:
                 print(f"[SELF-CHECK] 通过：流程(连坐) 报 FAIL，且 {want} 命中 → "

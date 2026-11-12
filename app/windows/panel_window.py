@@ -18,7 +18,7 @@
 | 原因 | 触发 | 实现 |
 |---|---|---|
 | ``deactivate`` | 点其他应用/桌面/任务栏（Qt 激活事件） | ``event()`` + ``changeEvent()`` → 120ms 复核 |
-| ``click-outside`` | 面板外左键按下（**不依赖 Qt 激活事件**） | ``OutsideClickWatcher`` 120ms 轮询 |
+| ``click-outside`` | 面板外左键按下（**不依赖 Qt 激活事件**） | ``OutsideClickWatcher`` 40ms 轮询 |
 | ``focus-lost`` | 曾经是前台，之后持续 ≥180ms 不是 | 同上 |
 | ``esc`` | 键盘 Esc | ``keyPressEvent`` |
 
@@ -251,11 +251,13 @@ class PanelWindow(QWidget):
 
     def _apply_text_colors(self) -> None:
         color = QColor(self.cat.bg_color)
+        # ITU-R BT.601 亮度（0–255），< 128 判定为深色底
         lum = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
-        dark_bg = lum < 128
-        fg = "#F2F4F8" if dark_bg else "#1F2430"
-        # hover：深底 → 纯白（更亮），浅底 → 加深（对比度更高）
-        hover_fg = "#FFFFFF" if dark_bg else "#000000"
+        is_dark_bg = lum < 128
+        # 方向：深色底配浅字，浅色底配深字（先保对比度，再谈好看）
+        fg = "#F2F4F8" if is_dark_bg else "#1F2430"
+        # hover：深底 → 纯白（更亮），浅底 → 纯黑（更深）
+        hover_fg = "#FFFFFF" if is_dark_bg else "#000000"
         self._title.setStyleSheet(f"font-weight: 600; color: {fg}; background: transparent;")
         self._folder_btn.setStyleSheet(
             "QPushButton { background: rgba(127,127,127,60); color: %s; "

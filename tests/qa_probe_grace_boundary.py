@@ -930,7 +930,7 @@ def main() -> int:
         install_mutant_patch()
         print("=" * 70)
         print("!!! mutant：判定基准退回「检查时刻」—— 预期红 ②③ + 流程(连坐)"
-              "（① 目标 60ms、实测 116~131ms，检查 236~251ms 未越 300ms，按 180ms 阈值不该红）")
+              "（① 实测 66~88ms、+120ms 复核 186~208ms，未越 300ms，按 180ms 阈值不该红）")
         print("=" * 70)
     if mutant_reset:
         install_mutant_reset_patch()
@@ -953,7 +953,7 @@ def main() -> int:
         install_mutant_nograce_patch()
         print("=" * 70)
         print("!!! mutant-nograce：产品 SHOW_GRACE_S 打成 0（宽限消失）—— "
-              "预期红 ①②③④ + 流程(连坐)；重置(复用) 必须绿（它不经过 _check_deactivate）")
+              "预期红 ①②③ + 流程(连坐)；④ 与 重置(复用) 必须绿")
         print("=" * 70)
 
     seed()

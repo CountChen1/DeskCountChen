@@ -157,6 +157,34 @@ def _crash_state() -> dict:
         return {"path": str(path), "exists": True, "size": -1}
 
 
+def _sao_root_files() -> list[dict]:
+    """数据根**根目录**下的文件（正常应为空：根目录只该有分类目录）。
+
+    为什么要单独列：``E:\\快捷方式SAO`` 根下曾被误写 6 个 ``启动-*.lnk``
+    （与 ``.launchers`` 里逐字节相同）。它们混在"文件数/字节数"里看不出来，
+    必须单列，否则会被"跑前跑后未变化 = 零污染"掩盖成一个通过项。
+
+    Returns:
+        ``[{name, size, mtime}]``；``mtime`` 是 epoch 秒（用于与基线时刻比较，
+        判断"是不是本轮写进去的"——比"对比基线的键"更硬，也不怕基线缺键）。
+    """
+    if not SAO_ROOT.is_dir():
+        return []
+    out: list[dict] = []
+    try:
+        for p in sorted(SAO_ROOT.iterdir()):
+            if not p.is_file():
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            out.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
+    except OSError:
+        return []
+    return out
+
+
 def collect() -> dict:
     """抓取一次完整真实状态快照（只读）。"""
     sao = _walk_stats(SAO_ROOT)
@@ -180,6 +208,8 @@ def collect() -> dict:
         # 注意：crash.log 在 .logs 下（不是 APP_DIR 根），且 faulthandler 会
         # 无条件创建它 → 判据是"大小 == 0"（无崩溃记录），不是"不存在"。
         "crash_log": _crash_state(),
+        # 数据根**根目录**下的文件（正常为空）——单独列，避免被"未变化"掩盖
+        "sao_root_files": _sao_root_files(),
     }
 
 
@@ -231,6 +261,19 @@ def compare(before: dict, after: dict) -> list[tuple[str, bool, str]]:
     add("无硬崩溃记录（.logs\\crash.log 为空）",
         (not crash["exists"]) or crash["size"] == 0,
         f"{crash['path']} size={crash['size']}")
+
+    # 数据根根目录：只判"本轮有没有**新增**"（用 mtime 与基线时刻比较，比对比
+    # 基线的键更硬，也不怕旧基线缺该字段）。历史误写文件在 main() 里以
+    # [WARN] 已知问题单列 —— 不能用一个 PASS 把它盖掉。
+    entries = after.get("sao_root_files") or []
+    if entries and isinstance(entries[0], str):        # 兼容旧基线格式
+        entries = [{"name": n, "size": 0, "mtime": 0.0} for n in entries]
+    baseline_ts = BASELINE.stat().st_mtime if BASELINE.is_file() else 0.0
+    written_now = [e["name"] for e in entries if float(e.get("mtime") or 0) > baseline_ts]
+    preexisting = [e["name"] for e in entries if float(e.get("mtime") or 0) <= baseline_ts]
+    add("SAO 数据根根目录无**新增**文件（本轮没再往里写）", not written_now,
+        "无新增" + (f"；跑前既有 {len(preexisting)} 个见下方 WARN" if preexisting else "")
+        if not written_now else f"本轮新写入 {written_now}")
     return results
 
 
@@ -253,6 +296,21 @@ def main(argv: list[str] | None = None) -> int:
         failed = [n for n, ok, _ in results if not ok]
         for name, ok, detail in results:
             print(f"[{'PASS' if ok else 'FAIL'}] {name}  ({detail})")
+        stray = snap.get("sao_root_files") or []
+        if stray and isinstance(stray[0], str):        # 兼容旧格式
+            stray = [{"name": n, "size": 0, "mtime": 0.0} for n in stray]
+        if stray:
+            baseline_ts = BASELINE.stat().st_mtime if BASELINE.is_file() else 0.0
+            import time as _time
+
+            print("\n[WARN] 已知问题（跑前即存在、非本轮验证产生，需用户确认后才可清理）：")
+            print(f"       数据根 {SAO_ROOT} 根目录下不应有文件（只该有分类目录），"
+                  f"实测 {len(stray)} 个：")
+            for item in stray:
+                stamp = _time.strftime("%Y-%m-%d %H:%M:%S",
+                                       _time.localtime(float(item.get("mtime") or 0)))
+                tag = "跑前既有" if float(item.get("mtime") or 0) <= baseline_ts else "本轮写入"
+                print(f"         {item['name']}  {item.get('size', 0)}B  mtime={stamp}  [{tag}]")
         print(f"\n共 {len(results)} 项，通过 {len(results) - len(failed)} 项")
         return 0 if not failed else 1
     print(json.dumps(snap, ensure_ascii=False, indent=2))

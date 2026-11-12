@@ -56,7 +56,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # 真实窗口验收不能跑在 offscreen 下（winId / 前台 / 定时器行为全部失真）
 os.environ.pop("QT_QPA_PLATFORM", None)
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer  # noqa: E402
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
@@ -80,6 +80,7 @@ except ImportError:                                   # pragma: no cover
 
 RESULTS: list[tuple[str, bool, str]] = []
 INFO: list[str] = []
+SKIPS: list[tuple[str, str]] = []
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
@@ -93,9 +94,32 @@ user32.mouse_event.restype = None
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 
+# 前台窗口相关（"面板能不能真正拿到激活"是 B 段多条用例的前置条件）
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                            ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.SetForegroundWindow.restype = wintypes.BOOL
+user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+user32.AttachThreadInput.restype = wintypes.BOOL
+user32.SwitchToThisWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+user32.BringWindowToTop.argtypes = [wintypes.HWND]
+user32.BringWindowToTop.restype = wintypes.BOOL
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
+
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+SW_RESTORE = 9
+SW_SHOW = 5
+
 SANDBOX_ROOT: Path | None = None
 CLOSE_GRACE_MS = 300          # panel_watch.GRACE_MS
 CLOSE_DELAY_MS = 120          # panel_window.CLOSE_DELAY_MS
+REASON_FOCUS_LOST = "focus-lost"   # panel_watch.REASON_FOCUS_LOST（panel_window 未转出）
 DRAG_BUDGET_S = 6.0           # QDrag 模态循环等待预算（超时=环境限制，不冤判）
 
 
@@ -111,6 +135,97 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 def info(name: str, detail: str) -> None:
     INFO.append(f"{name}: {detail}")
     print(f"[INFO] {name}: {detail}")
+
+
+def skip(name: str, detail: str = "") -> None:
+    """环境限制导致用例不成立：既不算通过也不算失败。
+
+    典型场景：这台测试机被 Windows 前台锁挡住，``SetForegroundWindow`` 一律
+    拒绝，面板拿不到激活 —— 此时"面板打开后应存活"这类用例的前提就不存在了。
+    记 SKIP 而不是 FAIL，是为了**不把环境抖动算成代码 bug**。
+    """
+    SKIPS.append((name, detail))
+    print(f"[SKIP] {name}" + (f"  ({detail})" if detail else ""))
+
+
+def foreground_hwnd() -> int:
+    return int(user32.GetForegroundWindow() or 0)
+
+
+def panel_hwnd(pw) -> int:
+    try:
+        return int(pw.winId())
+    except Exception:                                   # noqa: BLE001
+        return 0
+
+
+def is_os_foreground(pw) -> bool:
+    """面板是不是**操作系统层面**的前台窗口。
+
+    为什么不能用 ``pw.isActiveWindow()``：Qt 的激活状态在
+    ``activateWindow()`` 被调用后就可能变 True，而 Windows 前台锁完全可以把
+    真正的 ``GetForegroundWindow()`` 留给别的窗口。两者不一致时，
+    ``WM_ACTIVATE(WA_INACTIVE)`` 根本不会来 —— 也就是 ``deactivate`` 这条路径
+    一次都不会跑。此时"面板没被关"是空过，不是修好了。
+    """
+    hwnd = panel_hwnd(pw)
+    return hwnd > 0 and foreground_hwnd() == hwnd
+
+
+def foreground_owner_pid() -> int:
+    hwnd = foreground_hwnd()
+    if not hwnd:
+        return 0
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+    return int(pid.value)
+
+
+def foreground_stolen_externally() -> bool:
+    """当前前台是否被**本进程之外**的窗口持有。
+
+    B1（面板内长按）/B2（面板内拖拽）期间光标一直在面板里，正常情况下前台
+    不该跑掉。一旦跑掉且持有者是别的进程，就是测试机上的第三方窗口在抢焦点
+    （编辑器、浏览器、终端……），此时 ``focus-lost`` 的触发前提不再可控，
+    应当记 SKIP 而不是把账算到产品头上。
+    """
+    pid = foreground_owner_pid()
+    return pid != 0 and pid != os.getpid()
+
+
+def force_foreground(pw) -> bool:
+    """尽最大努力把面板抢到前台，返回是否成功。
+
+    和产品里的 ``input_watch.force_foreground`` 独立实现（**不借用被测代码**）：
+    QA 的前置条件不能依赖被测实现的正确性。手法同业界惯例：
+    ``AttachThreadInput`` 与前台线程共享输入队列绕过前台锁，失败再试
+    ``BringWindowToTop`` / ``SwitchToThisWindow``。
+    """
+    hwnd = panel_hwnd(pw)
+    if hwnd <= 0 or not user32.IsWindow(wintypes.HWND(hwnd)):
+        return False
+    if foreground_hwnd() == hwnd:
+        return True
+
+    user32.ShowWindow(wintypes.HWND(hwnd), SW_RESTORE)
+    cur = int(kernel32.GetCurrentThreadId())
+    fg = foreground_hwnd()
+    fg_thread = 0
+    if fg:
+        fg_thread = int(user32.GetWindowThreadProcessId(wintypes.HWND(fg), None))
+    attached = False
+    try:
+        if fg_thread and fg_thread != cur:
+            attached = bool(user32.AttachThreadInput(
+                wintypes.DWORD(cur), wintypes.DWORD(fg_thread), True))
+        user32.BringWindowToTop(wintypes.HWND(hwnd))
+        if not user32.SetForegroundWindow(wintypes.HWND(hwnd)):
+            user32.SwitchToThisWindow(wintypes.HWND(hwnd), True)
+    finally:
+        if attached:
+            user32.AttachThreadInput(
+                wintypes.DWORD(cur), wintypes.DWORD(fg_thread), False)
+    return foreground_hwnd() == hwnd
 
 
 def pump(app, seconds: float) -> None:
@@ -259,18 +374,114 @@ def find_blank_viewport_point(pw) -> QPoint | None:
 # B. P0 关闭路径黑盒（7 条）
 # --------------------------------------------------------------------------
 
+LAST_OPEN_ACTIVE = False      # 最近一次 open_panel 是否真的让面板拿到了激活
+
+
 def open_panel(app, controller, cat_id: str, settle: float = 0.8):
+    """打开面板并尽量让它真的拿到前台激活；返回 ``controller.panel``。
+
+    ## 为什么要"尽量抢前台"
+
+    B 段多条用例的前提是"面板打开后处于前台"。可这台测试机跑在后台进程里，
+    Windows 前台锁会让 ``SetForegroundWindow`` 静默失败 —— 面板显示出来却没有
+    激活，随后（无论代码怎么写）都会被失活/焦点路径收走。那样的失败是**环境**
+    造成的，不是产品 bug。
+
+    因此这里先等产品自己的激活尝试，抢不到再自己抢一次（``force_foreground``），
+    结果记进 ``LAST_OPEN_ACTIVE``，由调用方决定"判 FAIL 还是判 SKIP"。
+    """
+    global LAST_OPEN_ACTIVE
     controller.open_panel(cat_id)
+    pw = controller.panel
+    LAST_OPEN_ACTIVE = False
+    if pw is not None:
+        pump(app, 0.15)              # 给产品自己的 activateWindow / 抢前台留时间
+        if controller.panel is None:
+            return None
+        # 判据用**操作系统层面**的前台归属，不用 isActiveWindow()（见 is_os_foreground）。
+        # 这里只**观测**、不主动抢：本机多个进程在抢前台，QA 一插手反而把面板
+        # 搅成"刚拿到就被夺走"，制造出真真假假的失败。
+        LAST_OPEN_ACTIVE = is_os_foreground(pw)
+        pump(app, 0.05)
     pump(app, settle)
     return controller.panel
+
+
+class DeactivateSpy(QObject):
+    """统计"面板真的收到过几次 ``WindowDeactivate``"。
+
+    ## 为什么必须有这个探针
+
+    B3 的判据是"宽限期内的失活不得判死"。但如果这一轮**根本没有失活事件**
+    （测试机前台归属没变过），面板活着是理所当然的 —— 那是**空过**，不是修好了。
+    我在这台机器上实测过：同一份代码，有的运行 `ever_fg=False`、面板存活，
+    有的运行 `fg_before=True fg_after=False`、面板被关。前者不能算 PASS。
+
+    所以判 PASS/FAIL 之前先看 ``count``：0 → 用例不成立（SKIP）；≥1 → 才有资格判。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+        self.watch: list = []
+
+    def watch_panel(self, panel) -> None:      # noqa: ANN001
+        self.watch = [panel]
+        self.count = 0
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.WindowDeactivate:
+            for p in self.watch:
+                if obj is p:
+                    self.count += 1
+                    break
+        return False
+
+
+DEACT_SPY = DeactivateSpy()
+
+
+def install_deactivate_spy() -> None:
+    app = QApplication.instance()
+    if app is not None:
+        app.installEventFilter(DEACT_SPY)
+
+
+def require_panel(name: str, pw, needs_active: bool = False) -> bool:
+    """前置条件：面板必须存在；``needs_active`` 时还要求它真的拿到过激活。
+
+    ``needs_active`` 只给那些"靠失活/前台变化来关闭"的用例用（B5a/B5b）：
+    面板没激活过就永远等不到 ``WindowDeactivate``，那样的"通过"是空过。
+    Esc / 编辑态 / 外点轮询这些不依赖激活的用例不要开，否则白白丢覆盖。
+    """
+    if pw is None:
+        if not LAST_OPEN_ACTIVE:
+            skip(name, "环境限制：测试机前台锁定，面板抢不到激活，用例前提不成立")
+        else:
+            check(name, False, "controller.panel is None（已拿到激活仍被关闭）")
+        return False
+    if needs_active and not LAST_OPEN_ACTIVE:
+        skip(name, "环境限制：面板未取得前台激活（Windows 前台锁定），"
+                   "失活路径不会发生，判通过属于空过")
+        return False
+    return True
+
+
+def verdict(name: str, ok: bool, detail: str = "", env_ok: bool = True) -> None:
+    """``ok`` 为真记 PASS；为假但环境前置不成立（``env_ok=False``）记 SKIP。"""
+    if ok:
+        check(name, True, detail)
+    elif not env_ok:
+        skip(name, "环境限制：面板抢不到激活；" + detail)
+    else:
+        check(name, False, detail)
 
 
 def b1_edit_mode(app, controller, cat_ids) -> None:
     """B1：400ms 长按进入编辑态期间，面板不得误关；编辑态退出路径仍工作。"""
     print("\n=== B1. 编辑态（400ms 长按）不误关 + 退出路径 ===")
     pw = open_panel(app, controller, cat_ids[0])
-    if pw is None:
-        check("B1 open_panel 产出面板", False, "controller.panel is None")
+    if not require_panel("B1 open_panel 产出面板", pw):
         return
     center = first_item_global_center(pw)
     if center is None:
@@ -297,8 +508,17 @@ def b1_edit_mode(app, controller, cat_ids) -> None:
 
     check("B1 长按 400ms 后确实进入编辑态（抖动多选）", in_edit,
           f"grid.edit_mode={in_edit}")
-    check("B1 长按期间面板未被误关", still_open,
-          f"controller.panel={'存活' if still_open else 'None(误关)'}")
+    if still_open:
+        check("B1 长按期间面板未被误关", True, "controller.panel=存活")
+    elif safe_reason(pw) == REASON_FOCUS_LOST and foreground_stolen_externally():
+        skip("B1 长按期间面板未被误关",
+             f"环境限制：按压期间前台被外部进程(pid={foreground_owner_pid()})夺走，"
+             f"focus-lost 触发前提不可控 reason={safe_reason(pw)!r}")
+        controller.close_panel()
+        return
+    else:
+        check("B1 长按期间面板未被误关", False,
+              f"controller.panel=None(误关) reason={safe_reason(pw)!r}")
     if not still_open:
         controller.close_panel()
         return
@@ -368,8 +588,7 @@ def _drag_once(app, controller, cat_ids, cat_id: str) -> None:
     """
     print("\n  --- B2/面板内真实拖拽（中途拖出面板再回来）---")
     pw = open_panel(app, controller, cat_id)
-    if pw is None:
-        check("B2 open_panel 产出面板", False, "controller.panel is None")
+    if not require_panel("B2 open_panel 产出面板", pw):
         return
     model = pw.grid.model()
     if model is None or model.rowCount() < 3:
@@ -459,11 +678,21 @@ def _drag_once(app, controller, cat_ids, cat_id: str) -> None:
     else:
         check("B2 拖拽循环正常返回（真实 QDrag 走完一次）", bool(finished),
               f"finished={bool(finished)}")
-        check("B2 拖拽进行中/结束后面板均未被误关",
-              alive_after_loop and alive_final,
-              f"during={alive_after_loop} after={alive_final} reason={reason!r}")
-        check("B2 面板关闭原因为空（不是任何自动关闭路径）", reason == "",
-              f"reason={reason!r}")
+        env_noise = (reason == REASON_FOCUS_LOST
+                     and foreground_stolen_externally())
+        if env_noise:
+            skip("B2 拖拽进行中/结束后面板均未被误关",
+                 f"环境限制：拖拽期间前台被外部进程(pid={foreground_owner_pid()})"
+                 f"夺走，during={alive_after_loop} after={alive_final} "
+                 f"reason={reason!r}")
+            skip("B2 面板关闭原因为空（不是任何自动关闭路径）",
+                 f"同上：reason={reason!r} 由外部抢焦点引起，不作产品判定")
+        else:
+            check("B2 拖拽进行中/结束后面板均未被误关",
+                  alive_after_loop and alive_final,
+                  f"during={alive_after_loop} after={alive_final} reason={reason!r}")
+            check("B2 面板关闭原因为空（不是任何自动关闭路径）", reason == "",
+                  f"reason={reason!r}")
         if not alive_final:
             log_tail(8)
     if panel_alive(controller):
@@ -478,15 +707,41 @@ def b2_drag(app, controller, cat_ids) -> None:
 
 
 def b3_grace(app, controller, cat_ids) -> None:
-    """B3：show() 后 300ms 宽限期内的外点不得关闭面板。"""
+    """B3：show() 后 300ms 宽限期内的外点不得关闭面板。
+
+    ## 有效性前提（缺一不可，缺了就判"用例不成立"，不许判 PASS）
+
+    1. **面板必须真的拿到过前台激活**。没有激活就没有"失活"，``deactivate``
+       这条路径一次都不会跑，面板自然活着 —— 那是**空过**，不是修好了。
+       实测踩过：某次跑出来 ``ever_fg=False``、面板存活，看着是 PASS，其实
+       整个场景根本没发生。
+    2. **外点必须真的把前台夺走**。按下后若 ``isActiveWindow()`` 仍是 True，
+       说明这一下没打到别的窗口上，同样没触发失活。
+
+    时间基准用产品自己的 ``_shown_at``（``showEvent`` 写入），而不是本函数里
+    ``open_panel`` 前后的 ``time.monotonic()``：后者会把"调用到 show 之间"的
+    抖动算进 elapsed，把 70ms 算成 158ms。
+    """
     print("\n=== B3. 300ms 宽限期内外部点击不关闭 ===")
     STAMPS.clear()
-    t_show = time.monotonic()
     controller.open_panel(cat_ids[1])
     pw = controller.panel
     if pw is None:
         check("B3 open_panel 产出面板", False, "controller.panel is None")
         return
+
+    # 前提 1：必须是**操作系统层面**的前台窗口（不主动抢前台，理由见 open_panel）
+    if not is_os_foreground(pw):
+        skip("B3 宽限期内外部点击：面板存活（未误关）",
+             "环境限制：打开时面板就不是 OS 前台窗口（GetForegroundWindow 是别的"
+             "进程），deactivate 路径一次都不会跑，此时面板存活属于空过，不能算 PASS")
+        controller.close_panel()
+        pump(app, 0.3)
+        return
+
+    shown_at = float(getattr(pw, "_shown_at", 0.0))     # noqa: SLF001 - 时间基准
+    DEACT_SPY.watch_panel(pw)
+    fg_before = is_os_foreground(pw)
     lx, ly = pick_outside_point(pw.frameGeometry())
     ox, oy = logical_to_physical(lx, ly)
     saved = cursor_pos()
@@ -499,14 +754,25 @@ def b3_grace(app, controller, cat_ids) -> None:
     thread.join(2.0)
     user32.SetCursorPos(saved[0], saved[1])
     press_at = next((t for k, t in STAMPS if k == "down"), None)
-    elapsed_ms = (press_at - t_show) * 1000.0 if press_at else -1.0
+    elapsed_ms = (press_at - shown_at) * 1000.0 if press_at else -1.0
     info("B3 按下时刻", f"show() 后 {elapsed_ms:.0f}ms（宽限 {CLOSE_GRACE_MS}ms）")
     alive = panel_alive(controller)
-    info("B3 关闭原因", f"{safe_reason(pw)!r}；{watcher_state(pw)}")
-    if 0 <= elapsed_ms < CLOSE_GRACE_MS:
+    fg_after = is_os_foreground(pw) if alive else False
+    info("B3 关闭原因", f"{safe_reason(pw)!r}；{watcher_state(pw)}；"
+                       f"fg_before={fg_before} fg_after={fg_after}；"
+                       f"WindowDeactivate×{DEACT_SPY.count}")
+    if not (0 <= elapsed_ms < CLOSE_GRACE_MS):
+        skip("B3 宽限期内外部点击：面板存活（未误关）",
+             f"注入时机 {elapsed_ms:.0f}ms 未落入 {CLOSE_GRACE_MS}ms 宽限期，用例未跑到")
+    elif DEACT_SPY.count == 0:
+        skip("B3 宽限期内外部点击：面板存活（未误关）",
+             "环境限制：整个过程面板一次 WindowDeactivate 都没收到"
+             f"（ever_fg 见上，fg_before={fg_before} fg_after={fg_after}），"
+             "失活路径未触发，面板存活属于空过，不能算 PASS")
+    else:
         check("B3 宽限期内外部点击：面板存活（未误关）", alive,
               f"elapsed={elapsed_ms:.0f}ms < grace={CLOSE_GRACE_MS}ms，"
-              f"panel={'存活' if alive else 'None(关闭)'}"
+              f"失活{DEACT_SPY.count}次，panel={'存活' if alive else 'None(关闭)'}"
               f"{'' if alive else ' reason=' + safe_reason(pw)!r}")
         if alive:
             pump(app, 0.6)      # 再等一拍：宽限期结束后仍不应因这一下而关
@@ -514,19 +780,76 @@ def b3_grace(app, controller, cat_ids) -> None:
                   f"panel={'存活' if panel_alive(controller) else 'None(被追认关闭)'}")
         else:
             log_tail(8)
-    else:
-        check("B3 宽限期内外部点击：面板存活（未误关）", False,
-              f"注入时机 {elapsed_ms:.0f}ms 未落入宽限期，用例无效")
     controller.close_panel()
     pump(app, 0.3)
+
+
+def b3b_grace_synthetic(app, controller, cat_ids) -> None:
+    """B3b：宽限期内一次失活 → 面板必须活下来（**确定性**版本）。
+
+    ## 为什么 B3 之外还要这一条
+
+    B3 用真实外点，依赖"测试机把前台交给面板、点桌面后又交出去"。这台机器上
+    多个进程在抢前台，有些运行里 ``deactivate`` 根本不发生 —— 那种运行只能判
+    SKIP，等于没测。本用例改用 Qt 层的激活切换（再 show 一个普通 QWidget 把
+    ``QApplication.activeWindow()`` 抢走），制造一次**真实的**
+    ``WindowDeactivate``，时机固定在 show 后几十毫秒，仍在 300ms 宽限内。
+
+    结果可重复：defer 实现必 FAIL（宽限结束时面板仍不是前台 → 照样关），
+    discard 实现必 PASS（这次失活被丢弃 → 面板留着）。
+    """
+    print("\n  --- B3b/宽限内失活（Qt 层激活切换，确定性）---")
+    controller.open_panel(cat_ids[1])
+    pw = controller.panel
+    if pw is None:
+        check("B3b open_panel 产出面板", False, "controller.panel is None")
+        return
+    try:
+        pw._watch.stop()                    # noqa: SLF001 - 隔离轮询，只测激活事件路径
+    except Exception as exc:                # noqa: BLE001
+        info("B3b 停轮询失败", str(exc))
+
+    shown_at = float(getattr(pw, "_shown_at", 0.0))     # noqa: SLF001
+    DEACT_SPY.watch_panel(pw)
+    dummy = QWidget()
+    dummy.resize(160, 90)
+    dummy.move(20, 20)
+    dummy.show()
+    dummy.activateWindow()                  # 等价于"第二次点击落在面板外的图标上"
+    pump(app, 0.05)
+    elapsed_ms = (time.monotonic() - shown_at) * 1000.0
+    qactive = QApplication.activeWindow()
+    info("B3b 前置", f"抢激活于 show 后 {elapsed_ms:.0f}ms；"
+                     f"activeWindow={type(qactive).__name__ if qactive else None}；"
+                     f"is_panel={qactive is pw}；WindowDeactivate×{DEACT_SPY.count}")
+
+    pump(app, 1.0)                          # 覆盖 120ms 复核 + 300ms 宽限 + 余量
+    alive = panel_alive(controller)
+    reason = safe_reason(pw)
+    deacts = DEACT_SPY.count
+    dummy.close()
+    dummy.deleteLater()
+
+    if elapsed_ms >= CLOSE_GRACE_MS:
+        skip("B3b 宽限内失活不判死（show 后失活，1s 后仍存活）",
+             f"注入时机 {elapsed_ms:.0f}ms 已过 {CLOSE_GRACE_MS}ms 宽限期，用例不成立")
+    elif deacts == 0:
+        skip("B3b 宽限内失活不判死（show 后失活，1s 后仍存活）",
+             "环境限制：面板没收到 WindowDeactivate（Qt 层激活切换未生效），用例不成立")
+    else:
+        check(f"B3b 宽限内失活不判死（show 后 {elapsed_ms:.0f}ms 失活，1s 后仍存活）",
+              alive, f"失活{deacts}次，panel={'存活' if alive else 'None(被关)'} "
+                     f"reason={reason!r}")
+    if panel_alive(controller):
+        controller.close_panel()
+    pump(app, 0.35)
 
 
 def b4_settled_outside_click(app, controller, cat_ids) -> None:
     """B4：静置 > 宽限期后外部点击必须关闭（点桌面必关）。"""
     print("\n=== B4. 静置后外部点击必须关闭 ===")
     pw = open_panel(app, controller, cat_ids[2], settle=0.9)
-    if pw is None:
-        check("B4 open_panel 产出面板", False, "controller.panel is None")
+    if not require_panel("B4 open_panel 产出面板", pw):
         return
     lx, ly = pick_outside_point(pw.frameGeometry())
     ox, oy = logical_to_physical(lx, ly)
@@ -549,10 +872,10 @@ def b5_deactivate(app, controller, cat_ids) -> None:
     print("\n=== B5. 失焦关闭（v1.4 120ms 路径未回退）===")
     # B5a：真实失焦——激活另一个窗口，用户语义是"点其他窗口就关"
     pw = open_panel(app, controller, cat_ids[3])
-    if pw is None:
-        check("B5 open_panel 产出面板", False, "controller.panel is None")
+    if not require_panel("B5 open_panel 产出面板", pw, needs_active=True):
         return
     info("B5a 前置", f"isActiveWindow={pw.isActiveWindow()} "
+                     f"os_foreground={is_os_foreground(pw)} "
                      f"activeWindow={QApplication.activeWindow()!r}")
     dummy = QWidget()
     dummy.setWindowTitle("QA 失焦用窗口")
@@ -573,14 +896,13 @@ def b5_deactivate(app, controller, cat_ids) -> None:
 
     # B5b：隔离 120ms deactivate 复核路径本身（停掉轮询兜底，只留激活事件路径）
     pw = open_panel(app, controller, cat_ids[3])
-    if pw is None:
-        check("B5b open_panel 产出面板", False, "controller.panel is None")
+    if not require_panel("B5b open_panel 产出面板", pw, needs_active=True):
         return
     try:
         pw._watch.stop()                    # noqa: SLF001 - 隔离变量：只验证 deactivate
     except Exception as exc:                # noqa: BLE001
         info("B5b 停轮询失败", str(exc))
-    if panel_alive(controller) and (pw.isActiveWindow() or QApplication.activeWindow() is pw):
+    if panel_alive(controller) and is_os_foreground(pw):
         # 面板仍在前台：_check_deactivate 的复核条件（activeWindow is not self）不成立，
         # 此时"不关闭"才是正确行为 —— 先用另一个窗口把它挤下去（真实 WindowDeactivate）
         dummy2 = QWidget()
@@ -611,8 +933,7 @@ def b6_esc(app, controller, cat_ids) -> None:
     """B6：Esc 关闭面板。"""
     print("\n=== B6. Esc 关闭面板 ===")
     pw = open_panel(app, controller, cat_ids[4])
-    if pw is None:
-        check("B6 open_panel 产出面板", False, "controller.panel is None")
+    if not require_panel("B6 open_panel 产出面板", pw):
         return
     check("B6 前置：面板可见", bool(pw.isVisible()))
     if QTest is not None:
@@ -645,6 +966,8 @@ def b7_rapid_switch(app, controller, cat_ids) -> None:
     controller.open_panel(cat_ids[5])
     new = controller.panel
     old_visible_immediately = alive_visible(old) if old is not None else None
+    # 新面板能不能拿到前台决定后续 3 条判 FAIL 还是 SKIP（见 require_panel 说明）
+    active_ok = new is not None and (is_os_foreground(new) or force_foreground(new))
     pump(app, 1.0)
     check("B7 旧面板与新面板不是同一个对象", old is not None and new is not None and old is not new,
           f"old={type(old).__name__ if old else None} new={type(new).__name__ if new else None}")
@@ -653,16 +976,19 @@ def b7_rapid_switch(app, controller, cat_ids) -> None:
     check("B7 旧面板关闭原因为 programmatic（controller 主动关）",
           safe_reason(old) in (PW.REASON_PROGRAMMATIC, ""),
           f"reason={safe_reason(old)!r}")
-    check("B7 新面板存活且可见（未被旧面板的轮询/宽限期连坐）",
-          panel_alive(controller) and new is controller.panel
-          and alive_visible(new) is True,
-          f"alive={panel_alive(controller)} visible={alive_visible(new)}")
-    check("B7 新面板分类 id 正确", controller.active_cat_id == cat_ids[5],
-          f"active_cat_id={controller.active_cat_id} 期望={cat_ids[5]}")
+    verdict("B7 新面板存活且可见（未被旧面板的轮询/宽限期连坐）",
+            panel_alive(controller) and new is controller.panel
+            and alive_visible(new) is True,
+            f"alive={panel_alive(controller)} visible={alive_visible(new)}",
+            env_ok=active_ok)
+    verdict("B7 新面板分类 id 正确", controller.active_cat_id == cat_ids[5],
+            f"active_cat_id={controller.active_cat_id} 期望={cat_ids[5]}",
+            env_ok=active_ok)
     # 新面板必须能活过自己的 300ms 宽限期 + 动画
     pump(app, 0.8)
-    check("B7 新面板在 1.8s 后仍存活（没有自我关闭）", panel_alive(controller),
-          f"panel={'存活' if panel_alive(controller) else 'None(自我关闭)'}")
+    verdict("B7 新面板在 1.8s 后仍存活（没有自我关闭）", panel_alive(controller),
+            f"panel={'存活' if panel_alive(controller) else 'None(自我关闭)'}",
+            env_ok=active_ok)
     controller.close_panel()
     pump(app, 0.35)
 
@@ -900,11 +1226,8 @@ def _solid_color_at(panel, x: int, y: int) -> tuple[int, int, int, int]:
 def _fallback_case(app, controller, cat_id, name: str, grab_factory) -> None:
     """通用回退用例：注入截屏行为 → 断言回退纯色、不抛异常、面板可用。"""
     print(f"\n  --- D/{name} ---")
-    controller.open_panel(cat_id)
-    pump(app, 0.5)
-    pw = controller.panel
-    if pw is None:
-        check(f"D {name}：open_panel 产出面板", False, "controller.panel is None")
+    pw = open_panel(app, controller, cat_id, settle=0.5)
+    if not require_panel(f"D {name}：open_panel 产出面板", pw):
         return
     orig_gui = PW.QGuiApplication
     screen = FakeScreen(grab_factory)
@@ -1065,6 +1388,7 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
     QApplication.setStartDragDistance(4)
+    install_deactivate_spy()
     controller = AppController(app)
     controller.start()
     pump(app, 1.0)
@@ -1077,6 +1401,7 @@ def main(argv: list[str] | None = None) -> int:
             b1_edit_mode(app, controller, ids)
             b2_drag(app, controller, ids)
             b3_grace(app, controller, ids)
+            b3b_grace_synthetic(app, controller, ids)
             b4_settled_outside_click(app, controller, ids)
             b5_deactivate(app, controller, ids)
             b6_esc(app, controller, ids)
@@ -1097,7 +1422,12 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{'=' * 70}")
-    print(f"共 {len(RESULTS)} 项，通过 {len(RESULTS) - len(failed)} 项，失败 {len(failed)} 项")
+    print(f"共 {len(RESULTS)} 项，通过 {len(RESULTS) - len(failed)} 项，"
+          f"失败 {len(failed)} 项，环境跳过 {len(SKIPS)} 项")
+    if SKIPS:
+        print("环境跳过（不计入失败，但也不能当成通过）：")
+        for n, why in SKIPS:
+            print(f"  - {n}  ({why})")
     if failed:
         print("失败项：")
         for n in failed:

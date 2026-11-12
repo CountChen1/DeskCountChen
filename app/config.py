@@ -51,6 +51,11 @@ _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _DEFAULT_BG_COLOR = "#F5F6F8"
 _POSITION_MODES = ("anchor", "center")
 
+# 面板材质（v1.5）：blur = 截屏 + 降采样模糊的毛玻璃；solid = 纯色填充（v1.4 行为）
+MATERIAL_BLUR = "blur"
+MATERIAL_SOLID = "solid"
+MATERIALS = (MATERIAL_BLUR, MATERIAL_SOLID)
+
 # 快捷方式落点模式（v1.4）：launcher = 私有启动器目录（SAO 引用），desktop = 真实桌面
 SHORTCUT_MODE_LAUNCHER = "launcher"
 SHORTCUT_MODE_DESKTOP = "desktop"
@@ -122,6 +127,12 @@ def normalize_shortcut_mode(value) -> str:
     """快捷方式落点模式：只接受 launcher / desktop，非法值回落 launcher。"""
     text = str(value or "").strip().casefold()
     return text if text in SHORTCUT_MODES else SHORTCUT_MODE_LAUNCHER
+
+
+def normalize_material(value) -> str:
+    """面板材质：只接受 blur / solid，非法值回落 blur（v1.5 默认毛玻璃）。"""
+    text = str(value or "").strip().casefold()
+    return text if text in MATERIALS else MATERIAL_BLUR
 
 
 def normalize_data_root(value) -> str:
@@ -229,6 +240,7 @@ class CategoryConfig:
     bg_color: str = _DEFAULT_BG_COLOR
     opacity: int = 88                # 面板透明度 0–100（0=只剩内容）
     position_mode: str = "anchor"    # anchor=贴合鼠标落点 / center=屏幕居中
+    material: str = MATERIAL_BLUR    # v1.5：blur=毛玻璃(截屏模糊) / solid=纯色
 
     def dir_path(self, root: Path) -> Path:
         """本分类的数据目录（不创建）。"""
@@ -248,6 +260,7 @@ class CategoryConfig:
             "bg_color": self.bg_color,
             "opacity": self.opacity,
             "position_mode": self.position_mode,
+            "material": self.material,
         }
 
     @classmethod
@@ -269,6 +282,8 @@ class CategoryConfig:
             bg_color=_valid_color(d.get("bg_color")),
             opacity=clamp_int(d.get("opacity"), OPACITY_MIN, OPACITY_MAX, 88),
             position_mode=mode,
+            # v1.5：旧配置（v1.4）没有该字段 → 默认毛玻璃，向后兼容
+            material=normalize_material(d.get("material")),
         )
 
     def sanitize(self) -> None:
@@ -282,6 +297,7 @@ class CategoryConfig:
         self.bg_color = _valid_color(self.bg_color)
         if self.position_mode not in _POSITION_MODES:
             self.position_mode = "anchor"
+        self.material = normalize_material(self.material)
 
 
 @dataclass

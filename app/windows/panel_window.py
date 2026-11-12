@@ -1,19 +1,61 @@
-"""PanelWindow：半透明圆角面板窗口。
+"""PanelWindow：半透明圆角面板窗口（v1.5：毛玻璃 + 缩放缓入 + 关闭兜底）。
 
-- 背景 = paintEvent 中 QPainterPath.addRoundedRect + fillPath(带 alpha 的
-  QColor)；严禁 setWindowOpacity / QGraphicsOpacityEffect（会连子控件一起淡掉）；
-  opacity=0 时只剩内容；
-- 边缘 6px 拉伸（不用 QSizeGrip，右下角留给"打开此文件夹"）；
-- 失焦（WindowDeactivate）延迟 120ms 后若仍非激活则 close()；
-- 标题区可拖动窗口。
+## 背景绘制（硬约束）
+
+- 背景一律在 ``paintEvent`` 里画，**严禁** ``setWindowOpacity`` /
+  ``QGraphicsOpacityEffect``（那会把子控件一起淡掉，opacity=0 时整块面板消失）。
+  淡入用的是 painter 级 ``setOpacity``，只影响背景层，不影响子控件。
+- ``material == "blur"``（v1.5 默认）：截屏 → 裁剪面板区域 → 降采样 1/8 →
+  平滑放大回来（经典降采样模糊，视觉等效高斯，实测与高斯无差别但成本 < 10ms），
+  再叠加 ``cat.bg_color`` + ``cat.opacity`` 的 tint，最后加 1px 顶部高光 + 内侧
+  暗边做玻璃厚度感。
+- ``material == "solid"``：v1.4 行为（纯 ``cat.bg_color`` 填充）。
+- ``cat.opacity == 0`` 时**连模糊底图一起不画**：保持"只剩内容"的既有语义
+  （模糊底属于背景，不是内容）。
+
+## 关闭路径（四条，互不排斥）
+
+| 原因 | 触发 | 实现 |
+|---|---|---|
+| ``deactivate`` | 点其他应用/桌面/任务栏（Qt 激活事件） | ``event()`` + ``changeEvent()`` → 120ms 复核 |
+| ``click-outside`` | 面板外左键按下（**不依赖 Qt 激活事件**） | ``OutsideClickWatcher`` 120ms 轮询 |
+| ``focus-lost`` | 曾经是前台，之后持续 ≥180ms 不是 | 同上 |
+| ``esc`` | 键盘 Esc | ``keyPressEvent`` |
+
+为什么必须有 ``click-outside``：面板由 SAO Utils 唤起后台进程，Windows 前台锁定
+常让 ``SetForegroundWindow`` 失败 → 面板从未成为前台 → 点桌面**没有**任何激活
+事件 → 前两条路径全线失效（实测 100% 复现，见 ``tests/probe_close_bug.py``）。
 """
 
 from __future__ import annotations
 
 import logging
+import time
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QPainter, QPainterPath
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QPoint,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    Signal,
+)
+from PySide6.QtGui import (
+    QColor,
+    QFontMetrics,
+    QGuiApplication,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -22,9 +64,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config import CategoryConfig
+from app.config import MATERIAL_BLUR, CategoryConfig
 from app.panel_model import PanelModel
+from app.win32 import input_watch
 from app.windows.panel_grid import PanelGrid
+from app.windows.panel_watch import OutsideClickWatcher, SystemInputSource
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +77,17 @@ MIN_H = 160
 EDGE = 6          # 边缘拉伸带宽度（px）
 HEADER_H = 36     # 标题拖动区高度
 CLOSE_DELAY_MS = 120
+
+# -- v1.5 外观动画 ---------------------------------------------------------
+SCALE_START = 0.94        # 出现时从 94% 缩放到 100%
+FADE_IN_MS = 140          # 出现动画时长（OutCubic）
+FADE_OUT_MS = 80          # 关闭动画时长（可选）
+BLUR_DOWNSCALE = 8        # 模糊降采样倍数（1/8 → 平滑放大）
+RECAPTURE_DEBOUNCE_MS = 150   # 几何变化后重新截屏的去抖
+
+REASON_DEACTIVATE = "deactivate"
+REASON_ESC = "esc"
+REASON_PROGRAMMATIC = "programmatic"
 
 
 def _edge_cursor(edge: str) -> Qt.CursorShape:
@@ -45,6 +100,46 @@ def _edge_cursor(edge: str) -> Qt.CursorShape:
     if edge in ("NW", "SE"):
         return Qt.CursorShape.SizeFDiagCursor
     return Qt.CursorShape.ArrowCursor
+
+
+def scaled_rect(rect: QRect, origin: QPointF, factor: float) -> QRect:
+    """以 ``origin`` 为不动点把矩形缩放 ``factor`` 倍（纯函数，便于单测）。
+
+    Args:
+        rect: 目标矩形（动画终点）。
+        origin: 不动点（全局坐标）。锚点模式下取"锚点被 clamp 进矩形后的点"，
+            于是面板看起来是**从图标方向展开**的，而不是从屏幕中心。
+        factor: 缩放系数（``SCALE_START`` = 0.94）。
+
+    Returns:
+        缩放后的矩形（宽高至少 1px）。
+    """
+    w = max(1, int(round(rect.width() * factor)))
+    h = max(1, int(round(rect.height() * factor)))
+    left = origin.x() + (rect.left() - origin.x()) * factor
+    top = origin.y() + (rect.top() - origin.y()) * factor
+    return QRect(int(round(left)), int(round(top)), w, h)
+
+
+def image_looks_blank(img: QImage) -> bool:
+    """截图是否"全黑/全透明"（远程桌面、UAC 保护、锁屏时常见）。
+
+    9 点采样即可：只要有一个采样点有可见亮度就认为有效。这样既避开"整屏
+    黑屏被当成有效底图"（面板变成一块黑玻璃），也不会因为某个点恰好是
+    纯黑而误判。
+    """
+    if img is None or img.isNull():
+        return True
+    w, h = img.width(), img.height()
+    if w <= 0 or h <= 0:
+        return True
+    for i in range(9):
+        x = min(w - 1, max(0, int(w * ((i % 3) + 0.5) / 3.0)))
+        y = min(h - 1, max(0, int(h * ((i // 3) + 0.5) / 3.0)))
+        color = QColor.fromRgba(int(img.pixel(x, y)))
+        if color.alpha() > 0 and (color.red() + color.green() + color.blue()) > 12:
+            return False
+    return True
 
 
 class PanelWindow(QWidget):
@@ -63,10 +158,21 @@ class PanelWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.cat = cat
+        self.close_reason = ""              # 关闭原因（deactivate/click-outside/…）
         self.setMouseTracking(True)  # 无按键时也要收到 move 以更新光标
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         # 注意：面板不加 WA_ShowWithoutActivating / NOACTIVATE —— 它必须能
         # 接收焦点才能实现 Esc 关闭与失焦关闭。
+
+        # -- 背景（毛玻璃底图 / 淡入系数） ---------------------------------
+        self._backdrop: QPixmap | None = None
+        self._backdrop_dirty: bool = True
+        self._fade: float = 1.0             # 背景 alpha 系数 0..1（禁用窗口透明度）
+        self._fade_pending: bool = False    # prepare_show 之后、animate_show 之前
+        self._closing: bool = False
+        self._last_blur_ms: float = 0.0
+        self._final_geom = QRect()
+        self._anim_start_geom = QRect()
 
         # 网格
         self.grid = PanelGrid(item_px=item_px, icon_cache=icon_cache,
@@ -111,18 +217,52 @@ class PanelWindow(QWidget):
         self.resize(w, h)
         self._apply_text_colors()
 
+        # -- 关闭兜底轮询（不依赖 Qt 激活事件） ---------------------------
+        self._watch = OutsideClickWatcher(
+            self._panel_rect,
+            source=SystemInputSource(lambda: int(self.winId())),
+            parent=self,
+        )
+        self._watch.triggered.connect(self.close_with_reason)
+
+        # -- 动画 ---------------------------------------------------------
+        self._geom_anim = QPropertyAnimation(self, b"geometry", self)
+        self._geom_anim.setDuration(FADE_IN_MS)
+        self._geom_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_anim = QVariantAnimation(self)
+        self._fade_anim.setDuration(FADE_IN_MS)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.valueChanged.connect(self._on_fade_value)
+        self._fade_anim.finished.connect(self._on_fade_finished)
+        self._fade_out_anim = QVariantAnimation(self)
+        self._fade_out_anim.setDuration(FADE_OUT_MS)
+        self._fade_out_anim.setEasingCurve(QEasingCurve.Type.InCubic)
+        self._fade_out_anim.valueChanged.connect(self._on_fade_value)
+        self._fade_out_anim.finished.connect(self._on_fade_out_finished)
+
+        self._recapture_timer = QTimer(self)
+        self._recapture_timer.setSingleShot(True)
+        self._recapture_timer.setInterval(RECAPTURE_DEBOUNCE_MS)
+        self._recapture_timer.timeout.connect(self._on_recapture_timeout)
+
     # -- 文字颜色随背景明暗自动切换 -------------------------------------------
 
     def _apply_text_colors(self) -> None:
         color = QColor(self.cat.bg_color)
         lum = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
-        fg = "#1F2430" if lum >= 128 else "#F2F4F8"
+        dark_bg = lum < 128
+        fg = "#F2F4F8" if dark_bg else "#1F2430"
+        # hover：深底 → 纯白（更亮），浅底 → 加深（对比度更高）
+        hover_fg = "#FFFFFF" if dark_bg else "#000000"
         self._title.setStyleSheet(f"font-weight: 600; color: {fg}; background: transparent;")
         self._folder_btn.setStyleSheet(
             "QPushButton { background: rgba(127,127,127,60); color: %s; "
             "border: none; border-radius: 5px; padding: 2px 12px; } "
             "QPushButton:hover { background: rgba(127,127,127,100); }" % fg
         )
+        self.grid.set_hover_colors(fg, hover_fg)
 
     # -- 模型与定位 ----------------------------------------------------------
 
@@ -155,19 +295,269 @@ class PanelWindow(QWidget):
         y = avail.top() + (avail.height() - self.height()) // 2
         self.move(max(avail.left(), x), max(avail.top(), y))
 
-    # -- 绘制：圆角半透明背景（填充 alpha，绝不用窗口透明度） -------------------
+    # -- 出现动画：94% → 100% + 背景 alpha 0 → 目标 -------------------------
+
+    def prepare_show(self, anchor_rect: QRect | None = None) -> None:
+        """``show()`` **之前**调用：截模糊底图 + 把几何缩到 94%（动画起点）。
+
+        必须早于 ``show()`` 截屏，否则会把面板自己截进底图。
+
+        Args:
+            anchor_rect: 面板锚点（1×1 矩形）。用于决定缩放不动点：
+                矩形外的锚点会被 clamp 到矩形边上，于是面板"从图标方向展开"。
+        """
+        self._final_geom = QRect(self.geometry())
+        self._backdrop_dirty = False
+        self._backdrop = self._capture_backdrop()
+        origin = self._scale_origin(anchor_rect)
+        self._anim_start_geom = scaled_rect(self._final_geom, origin, SCALE_START)
+        self._fade = 0.0
+        self._fade_pending = True
+        self.setGeometry(self._anim_start_geom)
+        self.update()
+
+    def animate_show(self) -> None:
+        """``show()`` **之后**调用：几何 94%→100%，背景 alpha 0→目标（140ms）。
+
+        两个动画都是"属性动画"，与窗口透明度无关（硬约束）。
+        """
+        if not self._fade_pending:
+            # 没走 prepare_show（例如单测直接 show）→ 直接把背景画满
+            self._fade = 1.0
+            self.update()
+            return
+        self._fade_pending = False
+        self._geom_anim.stop()
+        self._geom_anim.setStartValue(QRect(self._anim_start_geom))
+        self._geom_anim.setEndValue(QRect(self._final_geom))
+        self._geom_anim.start()
+        self._fade_out_anim.stop()
+        self._fade_anim.stop()
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.start()
+
+    def _scale_origin(self, anchor_rect: QRect | None) -> QPointF:
+        """缩放不动点：居中模式取面板中心，锚点模式取"锚点被 clamp 进面板"的点。"""
+        geo = self._final_geom if self._final_geom.isValid() else QRect(self.geometry())
+        if anchor_rect is None or self.cat.position_mode == "center":
+            return QPointF(geo.center())
+        ax = min(max(anchor_rect.center().x(), geo.left()), geo.right())
+        ay = min(max(anchor_rect.center().y(), geo.top()), geo.bottom())
+        return QPointF(ax, ay)
+
+    def _on_fade_value(self, value) -> None:
+        try:
+            self._fade = max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            self._fade = 1.0
+        self.update()
+
+    def _on_fade_finished(self) -> None:
+        self._fade = 1.0
+        self.update()
+
+    def _on_fade_out_finished(self) -> None:
+        self._fade = 0.0
+        self.update()
+        self.close()
+
+    @property
+    def fade(self) -> float:
+        """背景 alpha 系数（0..1，单测/探针断言用）。"""
+        return self._fade
+
+    @property
+    def blur_cost_ms(self) -> float:
+        """最近一次模糊底图的生成耗时（毫秒，验收证据用）。"""
+        return self._last_blur_ms
+
+    @property
+    def has_blur(self) -> bool:
+        """当前是否持有一张有效的模糊底图。"""
+        return self._backdrop is not None and not self._backdrop.isNull()
+
+    @property
+    def backdrop_size(self) -> tuple[float, float]:
+        """模糊底图的**逻辑**尺寸（无底图时返回 ``(0.0, 0.0)``，探针断言用）。"""
+        if self._backdrop is None or self._backdrop.isNull():
+            return 0.0, 0.0
+        dpr = float(self._backdrop.devicePixelRatio()) or 1.0
+        return self._backdrop.width() / dpr, self._backdrop.height() / dpr
+
+    # -- 模糊底图 ------------------------------------------------------------
+
+    def _use_blur(self) -> bool:
+        """是否该用模糊底图：材质为 blur **且** 背景不是全透明。
+
+        ``opacity == 0`` 的语义是"只剩内容"，此时连背景一起不画（v1.4 既有
+        需求，模糊底属于背景而不是内容）。
+        """
+        return self.cat.material == MATERIAL_BLUR and int(self.cat.opacity) > 0
+
+    def refresh_backdrop(self) -> None:
+        """重新截屏生成模糊底图（失败/全黑/尺寸不符 → 回退纯色，不抛异常）。
+
+        幂等：材质不是 blur、或 ``opacity == 0`` 时清空底图（回到纯色路径）。
+        """
+        self._backdrop_dirty = False
+        if not self._use_blur():
+            self._backdrop = None
+            return
+        start = time.perf_counter()
+        try:
+            backdrop = self._capture_blurred()
+        except Exception as exc:  # noqa: BLE001 - 取不到底图绝不能影响面板可用性
+            logger.warning("模糊底图生成失败，回退纯色绘制: %s", exc)
+            backdrop = None
+        self._backdrop = backdrop
+        self._last_blur_ms = (time.perf_counter() - start) * 1000.0
+        logger.info("面板模糊底图: %s（%.2f ms）",
+                    "成功" if backdrop is not None else "失败→纯色回退",
+                    self._last_blur_ms)
+
+    def _capture_backdrop(self) -> QPixmap | None:
+        """``prepare_show`` 用：生成底图并返回（实现复用 :meth:`refresh_backdrop`）。"""
+        self.refresh_backdrop()
+        return self._backdrop
+
+    def _capture_blurred(self) -> QPixmap | None:
+        """截屏 → 裁剪面板区域 → 降采样 1/8 → 平滑放大（等效高斯模糊）。
+
+        DPI：``grabWindow`` 返回的 pixmap 带 ``devicePixelRatio``，其像素是**物理
+        像素**；``frameGeometry()`` 是逻辑坐标。裁剪矩形因此必须乘 dpr，最后再
+        把 dpr 设回结果 pixmap，绘制时就能按逻辑矩形 1:1 铺满。
+        """
+        geo = self.frameGeometry()
+        if geo.width() < 8 or geo.height() < 8:
+            return None
+        screen = QGuiApplication.screenAt(geo.center()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return None
+        # 只抓面板所在的那一小块，不要抓整屏：整屏 1920x1080 实测 25–29ms，
+        # 只抓面板区域 6–8ms（900x700 面板也就 10ms 出头）。
+        #
+        # ⚠️ grabWindow(0, x, y, w, h) 的 x/y/w/h 是**逻辑坐标**：Qt 内部会乘
+        # devicePixelRatio 再抓物理像素，并把 dpr 设到返回的 pixmap 上
+        # （实测：请求 575x412 得到 719x515 的 pixmap，dpr=1.25）。
+        # 这里若再自己乘 dpr，就会抓错区域（偏移 25%）—— 踩过一次。
+        dpr = float(screen.devicePixelRatio()) or 1.0
+        sgeo = screen.geometry()
+        grab_x = int(round(geo.x() - sgeo.x()))
+        grab_y = int(round(geo.y() - sgeo.y()))
+        grab_w = int(round(geo.width()))
+        grab_h = int(round(geo.height()))
+        if grab_w < 8 or grab_h < 8:
+            return None
+        shot = screen.grabWindow(0, grab_x, grab_y, grab_w, grab_h)
+        if shot is None or shot.isNull():
+            logger.info("截屏失败（grabWindow 返回空），回退纯色")
+            return None
+        crop = shot.toImage()
+        if crop.isNull():
+            logger.info("截屏转 QImage 失败，回退纯色")
+            return None
+        # 尺寸不符（多屏负坐标 / 屏幕边缘越界）时按实际拿到的区域继续，
+        # 只要还能模糊就没有问题；实在太小就回退。
+        if crop.width() < 8 or crop.height() < 8:
+            logger.info("截屏裁剪区域无效（%sx%s），回退纯色", crop.width(), crop.height())
+            return None
+        if image_looks_blank(crop):
+            logger.info("截屏内容全黑/全透明，回退纯色")
+            return None
+        small = crop.scaled(
+            max(1, crop.width() // BLUR_DOWNSCALE),
+            max(1, crop.height() // BLUR_DOWNSCALE),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        blurred = small.scaled(
+            crop.width(), crop.height(),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        pixmap = QPixmap.fromImage(blurred)
+        if pixmap.isNull():
+            return None
+        pixmap.setDevicePixelRatio(dpr)
+        logical_w = pixmap.width() / dpr
+        logical_h = pixmap.height() / dpr
+        if abs(logical_w - geo.width()) > 2 or abs(logical_h - geo.height()) > 2:
+            # 尺寸不符（多屏负坐标 / 屏幕边缘越界）→ 底图会按 rect 拉伸，
+            # 视觉上仍是模糊背景，但记一条便于定位的日志。
+            logger.info("底图逻辑尺寸 %.0fx%.0f 与面板 %dx%d 不符（按拉伸绘制）",
+                        logical_w, logical_h, geo.width(), geo.height())
+        return pixmap
+
+    # -- 绘制：圆角背景（模糊底 + tint + 玻璃描边） ---------------------------
 
     def paintEvent(self, event) -> None:  # noqa: N802
-        r = float(self.cat.radius)
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), r, r)
+        if self._fade <= 0.001:
+            return      # 完全透明：不画背景（子控件照常由 Qt 自己绘制）
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setOpacity(self._fade)   # painter 级透明度：只影响背景层，不影响子控件
+        r = float(self.cat.radius)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, r, r)
+
+        has_backdrop = self.has_blur
+        if has_backdrop:
+            p.save()
+            p.setClipPath(path)
+            p.drawPixmap(self.rect(), self._backdrop)
+            p.restore()
+
         bg = QColor(self.cat.bg_color)
         bg.setAlpha(round(self.cat.opacity / 100 * 255))
         p.fillPath(path, bg)
 
-    # -- 失焦关闭 ------------------------------------------------------------
+        if has_backdrop:
+            # 玻璃厚度：外圈 1px 高光 + 顶部更亮的一条 + 内侧 1px 暗边
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255, 70), 1.0))
+            p.drawPath(path)
+            p.save()
+            p.setClipPath(path)
+            p.setPen(QPen(QColor(255, 255, 255, 120), 1.0))
+            p.drawLine(QPointF(rect.left() + r, 1.0), QPointF(rect.right() - r, 1.0))
+            p.restore()
+            inner = QPainterPath()
+            inner.addRoundedRect(rect.adjusted(1, 1, -1, -1), max(0.0, r - 1), max(0.0, r - 1))
+            p.setPen(QPen(QColor(0, 0, 0, 45), 1.0))
+            p.drawPath(inner)
+
+    # -- 关闭（含原因） ------------------------------------------------------
+
+    def close_with_reason(self, reason: str) -> None:
+        """带原因关闭：淡出 80ms 后真正 ``close()``（已关闭则幂等返回）。
+
+        原因会写进 ``closeEvent`` 的日志，便于区分"点外面关的"和"Esc 关的"。
+        """
+        if self._closing:
+            return
+        if not self.close_reason:
+            self.close_reason = str(reason or "")
+        if not self.isVisible():
+            self.close()
+            return
+        self._closing = True
+        self._watch.stop()
+        self._fade_anim.stop()
+        if self._fade > 0.05:
+            self._fade_out_anim.stop()
+            self._fade_out_anim.setStartValue(float(self._fade))
+            self._fade_out_anim.setEndValue(0.0)
+            self._fade_out_anim.start()
+        else:
+            self.close()
+
+    def _panel_rect(self) -> QRect:
+        """面板的全局矩形（逻辑坐标）——外部点击判定的唯一依据。"""
+        return QRect(self.frameGeometry())
+
+    # -- 失焦关闭（既有路径，行为不变） ---------------------------------------
 
     def event(self, event) -> bool:  # noqa: N802
         # PySide6 6.12 实测：WindowDeactivate 事件只派发到 QWidget.event()，
@@ -187,15 +577,57 @@ class PanelWindow(QWidget):
         from PySide6.QtWidgets import QApplication
 
         if self.isVisible() and QApplication.activeWindow() is not self:
-            self.close()
+            self.close_with_reason(REASON_DEACTIVATE)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         # Esc 关闭面板：桌面弹窗没有系统返回键，Esc 是唯一的键盘退出路径
         if event.key() == Qt.Key.Key_Escape:
-            self.close()
+            self.close_with_reason(REASON_ESC)
             event.accept()
             return
         super().keyPressEvent(event)
+
+    # -- 显示 / 隐藏 / 关闭：动画与轮询定时器的生命周期 -----------------------
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._closing = False
+        self._recapture_timer.stop()
+        if not self._fade_pending:
+            self._fade = 1.0
+        # 可选兜底：尽力真正抢到前台（抢到了激活事件自然正常；抢不到靠轮询）
+        try:
+            input_watch.force_foreground(int(self.winId()))
+        except Exception as exc:  # noqa: BLE001 - 抢前台失败绝不能影响显示
+            logger.debug("force_foreground 异常: %s", exc)
+        # 兜底轮询：从此刻开始计时 300ms 宽限期
+        self._watch.start()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._watch.stop()          # 定时器绝不能泄漏
+        self._recapture_timer.stop()
+        super().hideEvent(event)
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        super().moveEvent(event)
+        self._on_geometry_changed()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._on_geometry_changed()
+
+    def _on_geometry_changed(self) -> None:
+        """几何变化 → 底图失效。可见期间不重截（会截到面板自己）。"""
+        self._backdrop_dirty = True
+        if self.isVisible():
+            return
+        self._recapture_timer.start()
+
+    def _on_recapture_timeout(self) -> None:
+        if self.isVisible():
+            return          # 已经可见了：不重截，避免把面板自己截进底图
+        if self._backdrop_dirty:
+            self.refresh_backdrop()
 
     # -- 边缘拉伸 + 标题拖动 ---------------------------------------------------
 
@@ -300,6 +732,12 @@ class PanelWindow(QWidget):
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._watch.stop()               # 定时器绝不能泄漏
+        self._recapture_timer.stop()
+        for anim in (self._geom_anim, self._fade_anim, self._fade_out_anim):
+            anim.stop()
+        reason = self.close_reason or REASON_PROGRAMMATIC
+        logger.info("面板已关闭（原因=%s）: %s", reason, self.cat.id)
         self.closed.emit(self.cat.id)
         super().closeEvent(event)
 

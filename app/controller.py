@@ -50,6 +50,19 @@ logger = logging.getLogger(__name__)
 
 ORDER_SAVE_DEBOUNCE_MS = 200
 SAVE_DEBOUNCE_MS = 400
+
+# 「应用到全部分类」唯一的字段白名单（v1.5）。
+# 刻意不含 label / image / icon_px：它们是"身份/图标"，各分类必须保持独立；
+# 也不含 visible / dir / id：那是数据域，不是皮肤。
+SKIN_FIELDS = (
+    "panel_w",
+    "panel_h",
+    "radius",
+    "bg_color",
+    "opacity",
+    "position_mode",
+    "material",
+)
 TRAY_ICON_PX = 32
 INVALID_FILENAME_CHARS = '\\/:*?"<>|'
 
@@ -293,8 +306,13 @@ class AppController(QObject):
         else:
             pw.place_near(anchor_rect)
 
+        # v1.5：模糊底图必须在 show() 之前截（否则会把面板自己截进去），
+        # 同时把几何缩到 94% 作为缩放动画的起点。
+        pw.prepare_show(anchor_rect)
         pw.show()
         pw.activateWindow()  # 面板需要焦点以支持 Esc / 失焦关闭
+        # 94%→100% + 背景 alpha 0→目标（140ms OutCubic；不用窗口透明度）
+        pw.animate_show()
 
         fm.start_watch()
         self.panel = pw
@@ -347,7 +365,11 @@ class AppController(QObject):
         只能靠日志观测，没有这条就无法区分"打开了但立刻自关"和"一直开着"。
         仅可观测性，不改变任何行为。
         """
-        logger.info("面板已关闭（失焦/Esc）: %s", cat_id)
+        pw_sender = self.sender()
+        reason = str(getattr(pw_sender, "close_reason", "") or "unknown")
+        # 具体原因已由 PanelWindow.closeEvent 记 info 日志（deactivate /
+        # click-outside / focus-lost / esc），这里只补一条回调侧的 debug 轨迹。
+        logger.debug("面板关闭回调: %s（原因=%s）", cat_id, reason)
         if self.panel is not None and self.active_cat_id == cat_id:
             self.panel = None
             self.active_cat_id = None
@@ -447,6 +469,8 @@ class AppController(QObject):
             return
         dlg = SettingsDialog(cat)
         dlg.open_folder_requested.connect(lambda cid: self._on_open_folder(cid))
+        # 「应用到全部分类」：对话框先把界面值写回 cat，再回调这里复制到其余分类
+        dlg.apply_all_handler = self._apply_all_from_dialog
         code = dlg.exec_()
         if code != SettingsDialog.DialogCode.Accepted:
             return
@@ -468,6 +492,57 @@ class AppController(QObject):
         self._after_categories_changed()
         if self.panel is not None and self.active_cat_id == cat_id:
             self.close_panel()
+
+    # -- 全局设置（v1.5）：把一个分类的皮肤复制到所有分类 --------------------
+
+    def apply_to_all_categories(self, source_cat_id: str) -> int:
+        """把 ``source_cat_id`` 的皮肤字段复制到**所有**分类（含源分类本身）。
+
+        复制的字段见 :data:`SKIN_FIELDS`（面板宽高 / 圆角 / 背景色 / 透明度 /
+        弹出位置 / 材质）。``label`` / ``image`` / ``icon_px`` / ``visible`` /
+        ``dir`` 一律不动 —— 它们是分类身份与数据域，不是皮肤。
+
+        Args:
+            source_cat_id: 源分类 id（通常就是设置对话框正在编辑的分类）。
+
+        Returns:
+            受影响分类数（= 现在与源分类皮肤一致的数量；源分类本身也计入，
+            因此 6 个分类时返回 6，与"已应用到 6 个分类"的文案一致）。
+            源分类不存在时返回 0，且不做任何改动。
+        """
+        source = self.cfg.find(source_cat_id)
+        if source is None:
+            logger.warning("应用到全部分类失败：源分类不存在 %s", source_cat_id)
+            return 0
+        # 先把源分类自身 clamp 干净：否则一个越界值（radius=999）会被复制到
+        # 所有分类 —— 目标侧虽然也会 sanitize，但源分类自己会留下脏值。
+        source.sanitize()
+        skin = {name: getattr(source, name) for name in SKIN_FIELDS}
+        count = 0
+        for cat in self.cfg.categories:
+            if cat.id != source_cat_id:
+                for name, value in skin.items():
+                    setattr(cat, name, value)
+                cat.sanitize()      # 逐分类 clamp（半径/透明度/颜色都可能越界）
+            count += 1
+        logger.info("已把分类 %s 的皮肤应用到 %d 个分类: %s",
+                    source_cat_id, count, ", ".join(SKIN_FIELDS))
+        self._schedule_save()
+        return count
+
+    def _apply_all_from_dialog(self, cat_id: str) -> int:
+        """设置对话框点「应用到全部分类」时的落地动作（返回受影响分类数）。
+
+        与 400ms 去抖不同：这里**立即落盘**（用户点了按钮就要看到持久化结果）。
+        面板外观在构造期定型（布局边距/材质/圆角），无法热更新，因此若面板
+        正开着就关掉它 —— 对话框里也明确提示"重新打开面板后生效"。
+        """
+        count = self.apply_to_all_categories(cat_id)
+        self._save_timer.stop()     # 去抖定时器已无意义：立刻写
+        self.cfg.save()
+        if self.panel is not None:
+            self.close_panel()
+        return count
 
     # -- 面板内动作 -----------------------------------------------------------
 

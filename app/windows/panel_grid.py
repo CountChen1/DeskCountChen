@@ -40,12 +40,17 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QDrag, QMouseEvent
+from PySide6.QtCore import QEvent, QRect
+from PySide6.QtGui import QColor, QDrag, QIcon, QMouseEvent
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QFrame,
     QListView,
+    QStyle,
     QStyledItemDelegate,
+    QStyleOptionViewItem,
 )
 
 from app.config import DRAG_THRESHOLD_PX
@@ -60,14 +65,34 @@ JIGGLE_INTERVAL_MS = 50          # 20fps 相位推进
 LAUNCH_DEDUP_SECONDS = 0.5       # 防双击触发两次启动
 MIME_TYPE = "application/x-desktopbox-slots"   # 自研槽位拖拽的 MIME
 
+# v1.5 悬停效果：图标放大到 1.08（以单元格图标中心为基准），名字颜色变亮，
+# 150ms 内缓动（逐帧推进，不是瞬间跳变，避免闪烁/残影）。
+HOVER_SCALE = 1.08
+HOVER_ANIM_MS = 150.0
+HOVER_FRAME_MS = 16
+
+# 空位占位行的"不可交互"标记由 HOLE_ROLE 承载（见 app/panel_model.py）
+
 
 class JiggleDelegate(QStyledItemDelegate):
-    """编辑态抖动：仅平移/旋转绘制，不动数据、不重建模型。"""
+    """编辑态抖动 + 悬停高亮：都只影响绘制，不动数据、不重建模型。
+
+    绘制优先级（**顺序敏感**）：
+    1. ``HOLE_ROLE`` 空位行 → 什么都不画（保留网格空格）；
+    2. 编辑态 → 抖动（±1.2px 平移 + ±2° 旋转）。抖动是"正在重排"的强反馈，
+       此时不叠加悬停缩放，避免两个变换互相干扰；
+    3. 悬停进度 > 0 → 自绘图标（放大到 1.08，以图标中心为基准）+ 文字变亮；
+    4. 其余 → 走 Qt 原生绘制（行为与 v1.4 完全一致）。
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.phase: float = 0.0
         self.edit_mode: bool = False
+        # 悬停状态由 PanelGrid 持有（进度缓动、颜色都跟着面板背景走）
+        self.grid = None
+        self.hover_color: QColor = QColor("#FFFFFF")
+        self.normal_color: QColor = QColor("#1F2430")
 
     def paint(self, painter, option, index: QModelIndex) -> None:
         if index.data(HOLE_ROLE):
@@ -84,7 +109,85 @@ class JiggleDelegate(QStyledItemDelegate):
             super().paint(painter, option, index)
             painter.restore()
             return
+        progress = self.hover_progress(option, index)
+        if progress > 0.01 and option.rect.isValid():
+            self._paint_hovered(painter, option, index, progress)
+            return
+        if option.rect.isValid():
+            # 条目文字颜色跟随面板背景明暗（深底浅字 / 浅底深字）。
+            # v1.4 走样式默认的 palette 黑字，深色面板上几乎看不见；
+            # 悬停色必须与常态色不同，"名字变亮"这个效果才成立。
+            opt = QStyleOptionViewItem(option)
+            opt.palette.setColor(QPalette.ColorRole.Text, self.normal_color)
+            opt.palette.setColor(QPalette.ColorRole.HighlightedText, self.normal_color)
+            super().paint(painter, opt, index)
+            return
         super().paint(painter, option, index)
+
+    # -- 悬停 ---------------------------------------------------------------
+
+    def hover_progress(self, option, index: QModelIndex) -> float:
+        """该行的悬停进度 0..1。
+
+        主来源是 :meth:`PanelGrid.hover_progress`（150ms 缓动值）；同时兼容
+        样式自带的 ``State_MouseOver``（某些平台/Qt 版本会置位）——若样式认为
+        悬停而缓动还没起步，直接按 1.0 处理，保证"有 hover 就一定看得出"。
+        """
+        progress = 0.0
+        if self.grid is not None:
+            try:
+                progress = float(self.grid.hover_progress(index.row()))
+            except Exception:  # noqa: BLE001 - 绘制期绝不能被异常打断
+                progress = 0.0
+        if (option.state & QStyle.StateFlag.State_MouseOver) and progress <= 0.0:
+            progress = 1.0
+        return max(0.0, min(1.0, progress))
+
+    def hover_icon_scale(self, progress: float) -> float:
+        """悬停时图标的缩放系数（纯函数，便于单测断言 1.0 → 1.08）。"""
+        return 1.0 + (HOVER_SCALE - 1.0) * max(0.0, min(1.0, float(progress)))
+
+    def _paint_hovered(self, painter, option, index: QModelIndex, progress: float) -> None:
+        """自绘悬停态：图标按 1.08 缩放、文字改用高对比颜色。"""
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+
+        # 1) 背景层（选中底色 / 焦点框）交给样式，图标与文字由我们接管
+        bg_opt = QStyleOptionViewItem(opt)
+        bg_opt.text = ""
+        bg_opt.icon = QIcon()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, bg_opt, painter, widget)
+
+        # 2) 图标：以单元格内图标中心为基准放大
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        if isinstance(icon, QIcon) and not icon.isNull():
+            icon_rect = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemDecoration, opt, widget)
+            if not icon_rect.isValid() or icon_rect.isEmpty():
+                side = opt.decorationSize.width() if opt.decorationSize.isValid() else 48
+                icon_rect = QRect(0, 0, max(16, int(side)), max(16, int(side)))
+                icon_rect.moveCenter(QRect(opt.rect).center())
+            factor = self.hover_icon_scale(progress)
+            side = max(1, int(round(min(icon_rect.width(), icon_rect.height()) * factor)))
+            scaled = QRect(0, 0, side, side)
+            scaled.moveCenter(icon_rect.center())
+            icon.paint(painter, scaled, Qt.AlignmentFlag.AlignCenter)
+
+        # 3) 文字：悬停色（深底→白 / 浅底→黑），同样居中省略
+        text = opt.text
+        if text:
+            text_rect = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemText, opt, widget)
+            if text_rect.isValid() and not text_rect.isEmpty():
+                painter.save()
+                painter.setPen(self.hover_color)
+                painter.setFont(opt.font)
+                elided = opt.fontMetrics.elidedText(
+                    text, Qt.TextElideMode.ElideRight, text_rect.width())
+                painter.drawText(text_rect, int(opt.displayAlignment), elided)
+                painter.restore()
 
 
 class PanelGrid(QListView):
@@ -121,7 +224,22 @@ class PanelGrid(QListView):
         self.viewport().setAutoFillBackground(False)
 
         self.delegate = JiggleDelegate(self)
+        self.delegate.grid = self
         self.setItemDelegate(self.delegate)
+
+        # -- v1.5 悬停状态（图标 1.08 缩放 + 名字变亮，150ms 缓动） ----------
+        # setMouseTracking：无按键时也要收到 MouseMove，否则悬停无法跟随
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._hover_row = -1
+        self._hover_progress: dict[int, float] = {}
+        self._hover_last = time.monotonic()
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setInterval(HOVER_FRAME_MS)
+        self._hover_timer.timeout.connect(self._hover_tick)
+        self.normal_text_color = QColor("#1F2430")
+        self.hover_text_color = QColor("#FFFFFF")
 
         # 手势状态
         self._press_index = QModelIndex()
@@ -153,6 +271,74 @@ class PanelGrid(QListView):
         self._last_emitted_order = panel_model.serialize_slots()
         panel_model.model.rowsInserted.connect(self._on_rows_changed)
         panel_model.model.rowsRemoved.connect(self._on_rows_changed)
+
+    # -- 悬停效果（v1.5） ----------------------------------------------------
+
+    def set_hover_colors(self, normal_color, hover_color) -> None:
+        """设置条目文字的正常/悬停颜色（面板按背景明暗算好传进来）。"""
+        self.normal_text_color = QColor(normal_color)
+        self.hover_text_color = QColor(hover_color)
+        self.delegate.normal_color = self.normal_text_color
+        self.delegate.hover_color = self.hover_text_color
+        self.viewport().update()
+
+    def set_hover_row(self, row: int, immediate: bool = False) -> None:
+        """设置当前悬停行（``-1`` = 没有任何条目悬停）。
+
+        Args:
+            row: 行号（越界/负数视为"无悬停"）。
+            immediate: True = 立即到位（不缓动），单测/截图对比用。
+        """
+        row = int(row)
+        if row < 0 or (self.panel_model is not None
+                       and row >= self.panel_model.model.rowCount()):
+            row = -1
+        if row == self._hover_row:
+            return
+        old = self._hover_row
+        self._hover_row = row
+        if immediate:
+            if old >= 0:
+                self._hover_progress.pop(old, None)
+            if row >= 0:
+                self._hover_progress[row] = 1.0
+            self.viewport().update()
+            return
+        if row >= 0:
+            self._hover_progress.setdefault(row, 0.0)
+        self._hover_last = time.monotonic()
+        if not self._hover_timer.isActive():
+            self._hover_timer.start()
+
+    def hover_row(self) -> int:
+        """当前悬停行（-1 = 无）。"""
+        return self._hover_row
+
+    def hover_progress(self, row: int) -> float:
+        """该行的悬停进度 0..1（0=常态，1=完全悬停）。"""
+        return float(self._hover_progress.get(int(row), 0.0))
+
+    def _hover_tick(self) -> None:
+        """逐帧推进悬停进度（150ms 内到位），没有变化就停表。"""
+        now = time.monotonic()
+        dt = max(0.0, min(0.1, now - self._hover_last))
+        self._hover_last = now
+        step = (dt * 1000.0) / HOVER_ANIM_MS
+        moving = False
+        for row in list(self._hover_progress):
+            target = 1.0 if row == self._hover_row else 0.0
+            current = self._hover_progress[row]
+            nxt = (min(target, current + step) if current < target
+                   else max(target, current - step))
+            if nxt != current:
+                moving = True
+                self._hover_progress[row] = nxt
+            if nxt <= 0.0:
+                self._hover_progress.pop(row, None)
+        if moving:
+            self.viewport().update()
+        else:
+            self._hover_timer.stop()
 
     def set_item_px(self, px: int) -> None:
         self.item_px = int(px)
@@ -222,6 +408,10 @@ class PanelGrid(QListView):
                     if self.edit_mode:
                         self.exit_edit_mode()  # 点击空白退出编辑态
             elif t == QMouseEvent.Type.MouseMove:
+                if not self._press_index.isValid():
+                    # 无按键移动 → 更新悬停行（悬停跟随鼠标）
+                    idx_hover = self.indexAt(ev.position().toPoint())
+                    self.set_hover_row(idx_hover.row() if idx_hover.isValid() else -1)
                 if self._press_index.isValid():
                     delta = ev.globalPosition().toPoint() - self._press_pos
                     if abs(delta.x()) > DRAG_THRESHOLD_PX or abs(delta.y()) > DRAG_THRESHOLD_PX:
@@ -241,6 +431,8 @@ class PanelGrid(QListView):
                     if entry is not None:
                         self._maybe_launch(entry)
                 self._press_index = QModelIndex()
+            elif t == QEvent.Type.Leave:
+                self.set_hover_row(-1)
         return super().eventFilter(obj, ev)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802

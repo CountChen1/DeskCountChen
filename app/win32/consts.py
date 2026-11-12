@@ -139,6 +139,62 @@ _StrCmpLogicalW = shlwapi.StrCmpLogicalW
 _StrCmpLogicalW.argtypes = [LPCWSTR, LPCWSTR]
 _StrCmpLogicalW.restype = ctypes.c_int
 
+# ---------------------------------------------------------------------------
+# v1.5 新增：前台窗口 / 鼠标按键状态（P0-1 面板关闭兜底用）
+#
+# 为什么需要这些：面板由 SAO Utils 唤起 pythonw 后台进程，Windows 前台锁定
+# 常拒绝 SetForegroundWindow → 面板收不到 WindowDeactivate → 点桌面关不掉。
+# 这里提供的原始信号**不依赖 Qt 激活事件**。
+# ---------------------------------------------------------------------------
+
+VK_LBUTTON = 0x01                      # 鼠标左键虚拟键码
+GA_ROOT = 2                            # GetAncestor 取根窗口
+VK_SHIFT = 0x10                        # 预留（未使用，保持声明面完整）
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+# GetAsyncKeyState：最高位 = 当前是否按下（0x8000）
+_GetAsyncKeyState = user32.GetAsyncKeyState
+_GetAsyncKeyState.argtypes = [ctypes.c_int]
+_GetAsyncKeyState.restype = ctypes.c_short
+
+# GetCursorPos：物理屏幕像素（注意 DPI，不是 Qt 逻辑坐标）
+_GetCursorPos = user32.GetCursorPos
+_GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+_GetCursorPos.restype = BOOL
+
+_GetForegroundWindow = user32.GetForegroundWindow
+_GetForegroundWindow.argtypes = []
+_GetForegroundWindow.restype = wintypes.HWND
+
+_SetForegroundWindow = user32.SetForegroundWindow
+_SetForegroundWindow.argtypes = [wintypes.HWND]
+_SetForegroundWindow.restype = BOOL
+
+_GetWindowThreadProcessId = user32.GetWindowThreadProcessId
+_GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(DWORD)]
+_GetWindowThreadProcessId.restype = DWORD
+
+_AttachThreadInput = user32.AttachThreadInput
+_AttachThreadInput.argtypes = [DWORD, DWORD, BOOL]
+_AttachThreadInput.restype = BOOL
+
+_SwitchToThisWindow = user32.SwitchToThisWindow
+_SwitchToThisWindow.argtypes = [wintypes.HWND, BOOL]
+_SwitchToThisWindow.restype = None
+
+_GetAncestor = user32.GetAncestor
+_GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+_GetAncestor.restype = wintypes.HWND
+
+_IsWindow = user32.IsWindow
+_IsWindow.argtypes = [wintypes.HWND]
+_IsWindow.restype = BOOL
+
+_GetCurrentThreadId = kernel32.GetCurrentThreadId
+_GetCurrentThreadId.argtypes = []
+_GetCurrentThreadId.restype = DWORD
+
 # SHGetKnownFolderPath（真实桌面路径，含 OneDrive / 企业重定向）
 _SHGetKnownFolderPath = shell32.SHGetKnownFolderPath
 _SHGetKnownFolderPath.argtypes = [

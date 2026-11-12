@@ -1447,3 +1447,140 @@ anchor = max{ i | work[i] is not None 且 i ∉ picked }
 | 熔断 + 三道闸 + 同名接管交错 | `tests/test_desktop_shortcuts.py`：`PruneBreakerTests`（7 项）+ `PruneOrphanIconsTests`（10 项） | 通过 |
 | 无 GUI 自检 | `python tools/selfcheck.py` | 35/35 PASS |
 | 真实环境状态 | `python tools/verify_sao_state.py` | 41/41 PASS |
+
+---
+
+## 12. v1.5 变更（毛玻璃 + 面板关闭兜底 + 悬停 + 缩放缓入 + 全局设置）
+
+### 12.1 【P0】面板关不掉 —— 根因与不依赖激活事件的兜底
+
+**用户现象**：呼出面板后点击桌面，面板关不掉；呼出后 10 秒内鼠标不动，点桌面
+100% 关不掉；必须先点一次面板内部再点桌面才能关。
+
+**根因（实测取证，`tests/probe_close_bug.py`）**：面板由 SAO Utils 的 HUD 图标
+唤起 `pythonw` 后台进程。Windows 有前台锁定（`SPI_GETFOREGROUNDLOCKTIMEOUT`），
+后台进程的 `SetForegroundWindow` 常被拒绝 → 面板**从未真正成为前台窗口**
+（探针取证：`show` 后 `GetForegroundWindow() != 面板 hwnd`、
+`isActiveWindow() == False`）→ 点桌面不产生 `WindowDeactivate` /
+`ActivationChange(False)` → 依赖激活事件的两条关闭路径全线失效 → 永不关闭。
+用户点一次面板内部时，真实鼠标点击让 Windows 真正激活它，此后 Deactivate 才正常。
+
+**修复 = 三层**（新增 `app/win32/input_watch.py` + `app/windows/panel_watch.py`）：
+
+| 层 | 机制 | 说明 |
+|---|---|---|
+| ① 尽力抢前台 | `showEvent` 里 `force_foreground`（`AttachThreadInput` + `SetForegroundWindow` + `SwitchToThisWindow`） | 抢到了问题自然消失，但**绝不只依赖它**（系统可以拒绝） |
+| ② 外部点击轮询 | `OutsideClickWatcher` 每 **40ms** 查 `GetAsyncKeyState(VK_LBUTTON)` + `QCursor.pos()`，"抬起→按下"沿且落点在面板 `frameGeometry()` 之外 → `close(reason="click-outside")` | 用户直觉路径；落点用 Qt 逻辑坐标（`GetCursorPos` 是物理像素，DPI 125% 时直接比会差 25%） |
+| ③ 焦点丢失兜底 | 曾经是前台、之后前台持续 ≥180ms 不是面板 → `close(reason="focus-lost")` | 补 Qt 漏发激活事件的情形 |
+
+**四条安全红线（单测 `tests/test_panel_watch.py` 逐条覆盖）**：
+
+1. **前 300ms 宽限期**（`GRACE_MS`）：面板刚 `show()` 只记录不判死 —— 打开面板
+   的那一下点击、缩放缓入动画期间的鼠标状态都不能算"点外面"；
+2. **面板内部按下绝不触发**：判据是"落点在面板矩形之外"，内部点击/拖拽/长按/
+   拖出窗口的 `QDrag`（按下点在面板内）都不会关闭；
+3. **短按防误采**：`GetAsyncKeyState` 低位（"自上次查询以来按过"）对鼠标左键
+   **从不置位**（实测），只能靠高位；40ms 轮询 + "前后两拍任一落在面板内就不判
+   外部点击"，把漏采短按造成的误关概率压到零（代价：光标瞬移后立刻点击会漏判一次）；
+4. **`focus-lost` 必须曾经是前台**（`_ever_foreground`）：否则抢不到前台的机器上
+   面板会在 0.5s 后自己消失，把"关不掉"换成"打不开"。
+
+**轮询间隔为什么是 40ms 而不是设计初稿的 120–150ms**：真实单击的按下时长普遍
+50–100ms，120ms 一轮有约 1/3 概率整次漏掉（探针连续 3 轮未检出）；低位又不可用
+（见红线 3）。40ms 全覆盖，成本只是每秒 25 次两个轻量 API 调用。
+
+**定时器生命周期**：`showEvent` 启动、`hideEvent` / `closeEvent` 停止，
+`close_with_reason()` 也会先停 —— 不泄漏。
+
+**日志**：`面板已关闭（原因=deactivate|click-outside|focus-lost|esc|programmatic）: <cat_id>`。
+
+**既有行为不变**：`event()` / `changeEvent()` 的 120ms 失焦自关路径原样保留
+（`tests/probe_blur_esc.py` 的 A1–A3/B 用例继续通过）。
+
+### 12.2 【P1】毛玻璃背景（Win10 19045 可用）
+
+环境约束：Win10 22H2 没有 `DWMWA_SYSTEMBACKDROP_TYPE`；
+`SetWindowCompositionAttribute + ACCENT_ENABLE_ACRYLICBLURBEHIND` 拖动严重卡顿。
+因此用**截屏 + 降采样模糊**：
+
+```
+QScreen.grabWindow(0, 面板区域)      # 只抓面板那一小块（整屏 25–29ms，区域 6–8ms）
+  → 1/8 降采样（SmoothTransformation）
+  → 平滑放大回原尺寸                  # 等效高斯，实测 <10ms
+  → paintEvent：圆角裁剪 → 画底图 → 叠 cat.bg_color+cat.opacity tint
+     → 1px 外圈高光 + 顶部更亮一条 + 内侧 1px 暗边（玻璃厚度感）
+```
+
+实测（`tests/probe_visual_v15.py`，5 次）：min 7.4 / median 8.3 / max 12.3 ms。
+
+**两个实测陷阱**：
+
+1. `grabWindow(0, x, y, w, h)` 的参数是**逻辑坐标**（Qt 内部乘 dpr 再抓物理像素，
+   返回的 pixmap 自带 dpr）；自己再乘一遍 dpr 会抓错区域（偏移 25%）—— 踩过；
+2. 必须在 `show()` **之前**截（`prepare_show()`），否则把面板自己截进底图。
+   面板可见期间的 move/resize **不重截**（同样会截到自己），保持旧底图按需拉伸，
+   下次打开时重截。
+
+**回退**：截屏失败 / 全黑 / 全透明 / 尺寸无效 → 静默回退纯色绘制，不抛异常
+（`image_looks_blank` 9 点采样判定）。
+
+**配置**：`cat.material: "blur" | "solid"`（默认 `blur`；v1.4 旧配置缺字段 →
+默认值，向后兼容）。`opacity == 0` 时连模糊底图一起不画 —— "只剩内容"的既有
+语义不变（模糊底属于背景）。设置界面新增「面板材质」下拉。
+
+**硬约束依旧**：严禁 `setWindowOpacity` / `QGraphicsOpacityEffect`。
+
+### 12.3 【P2】悬停效果
+
+- 图标放大 **1.08**，以单元格内图标中心为基准（`JiggleDelegate._paint_hovered`）；
+- 名字颜色变亮：深底 → `#FFFFFF`，浅底 → 加深；同时把**常态**文字色也改成跟随
+  背景明暗（v1.4 是样式默认黑字，深色面板上几乎看不见，且悬停色必须与常态色
+  不同，"变亮"这个效果才成立）；
+- 150ms 缓动（16ms/帧推进 `hover_progress` 0→1，逐行独立，到位即停表不空转）；
+- `PanelGrid.setMouseTracking(True)` + viewport `WA_Hover`；delegate 同时兼容样式
+  自带的 `State_MouseOver`；
+- **不破坏**：抖动编辑态（抖动优先，不叠加悬停缩放）、自研 QDrag 槽位拖拽、
+  `HOLE_ROLE` 空位行（照旧完全不绘制）、编辑态长按多选。
+
+### 12.4 【P2】点击缩放淡入
+
+- 出现：几何从 **94%** → 100%（`QPropertyAnimation(geometry)`，140ms，`OutCubic`）
+  + 背景 alpha 系数 `self._fade` 0 → 1（`QVariantAnimation`，paintEvent 里
+  `p.setOpacity(fade)`，**不是**窗口透明度，子控件不受影响）；
+- 不动点 = 锚点被 clamp 进目标矩形后的点（`scaled_rect` 纯函数）→ 面板
+  "从图标方向展开"；`position_mode == "center"` 时取面板中心；
+- 时序：`place_*() → prepare_show(anchor) → show() → activateWindow() → animate_show()`；
+- 关闭：`close_with_reason()` 先 80ms 反向淡出再 `close()`（controller 主动
+  `close()` 的路径不走动画，保持即时）；
+- **与 P0 宽限期衔接**：动画 140ms < 宽限 300ms，动画期间的鼠标状态不会触发关闭；
+- 动画期间不重截底图（可见期间一律不重截）。
+
+### 12.5 【P2】全局设置：应用到全部分类
+
+- `SettingsDialog` 底部新增「应用到全部分类」按钮 + 提示
+  "面板外观改动在重新打开面板后生效"；
+- `AppController.apply_to_all_categories(source_cat_id) -> int`：把 `SKIN_FIELDS`
+  （`panel_w / panel_h / radius / bg_color / opacity / position_mode / material`）
+  复制到**所有**分类（含源分类自身，6 个分类时返回 6，文案即"已应用到 6 个分类"）；
+  源分类先 `sanitize()`，目标侧逐个 `sanitize()`；
+  **身份字段（`label` / `image` / `icon_px` / `visible` / `dir`）绝不动**；
+- 反馈：按钮变「已应用到 N 个分类」，2 秒后恢复；**立即落盘**（不走 400ms 去抖）；
+- 面板开着 → 直接关掉（外观在构造期定型，无法热更新），提示语已说明。
+
+### 12.6 v1.5 验证结论
+
+| 项 | 手段 | 结果 |
+|---|---|---|
+| 关闭缺陷复现（修复前） | `tests/probe_close_bug.py` @ v1.4 worktree | **A 用例 FAIL**（未激活态点外面不关；前置取证 fg != panel hwnd） |
+| 关闭缺陷修复（修复后） | 同一探针 | **6/6 PASS**（A 关闭 / B 内部不误关 / C 既有路径回归） |
+| 兜底判定逻辑 | `tests/test_panel_watch.py`（14 项） | 全过（含 4 条安全红线） |
+| 毛玻璃耗时 | `tests/probe_visual_v15.py` | median 8.33ms（<10ms 预算），底图尺寸 = 面板尺寸 |
+| 毛玻璃回退 | offscreen `tests/test_panel_appearance.py` | 截屏失败静默回退纯色，不抛异常 |
+| 缩放缓入 | 同上 + 探针 | 149–154ms 完成，fade 0→1，几何回到 100% |
+| 悬停 | 单测 + 探针像素对比 | 进度缓动到位；1.08 缩放；渲染差异 52%；常态/悬停文字色不同 |
+| 全局设置 | `tests/test_apply_all.py`（11 项） | 皮肤字段全同步、身份字段不动、立即落盘、开着的面板被关闭 |
+| 全量单测 | `python -m unittest discover -s tests -t .` | **264 tests OK**（v1.4 215 项 + 新增 49 项） |
+
+**新增文件**：`app/win32/input_watch.py`、`app/windows/panel_watch.py`、
+`tests/test_panel_watch.py`、`tests/test_panel_appearance.py`、
+`tests/test_apply_all.py`、`tests/probe_close_bug.py`、`tests/probe_visual_v15.py`。

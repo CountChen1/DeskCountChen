@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QColorDialog,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPushButton,
     QSlider,
@@ -31,6 +32,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import (
+    MATERIAL_BLUR,
+    MATERIAL_SOLID,
     CategoryConfig,
     ICON_PX_MAX,
     ICON_PX_MIN,
@@ -50,6 +53,7 @@ from app.config import (
 logger = logging.getLogger(__name__)
 
 IMAGE_FILTER = "图片 (*.png *.ico *.jpg *.jpeg *.bmp *.gif)"
+APPLY_ALL_FEEDBACK_MS = 2000     # 按钮文案"已应用到 N 个分类"的停留时长
 INVALID_FILENAME_CHARS = '\\/:*?"<>|'
 
 
@@ -67,6 +71,11 @@ class SettingsDialog(QDialog):
         self._image_cleared = False  # 用户清空图片=恢复默认
         self._bg_color = cat.bg_color
         self._old_label = cat.label
+        # 「应用到全部分类」的落地回调：Callable[[cat_id], int] → 受影响分类数。
+        # 由 AppController 注入（controller.apply_to_all_categories 的包装）；
+        # 未注入时按钮禁用（对话框单独使用/单测场景）。
+        self.apply_all_handler = None
+        self._apply_all_default_text = "应用到全部分类"
         self.setWindowTitle(f"分类设置 - {cat.label}")
         self.setMinimumWidth(360)
         self._build_ui()
@@ -133,6 +142,16 @@ class SettingsDialog(QDialog):
         idx = 0 if self.cat.position_mode == "anchor" else 1
         self.cmb_position.setCurrentIndex(idx)
 
+        self.cmb_material = QComboBox()
+        self.cmb_material.addItem("毛玻璃（截屏模糊）", MATERIAL_BLUR)
+        self.cmb_material.addItem("纯色（无模糊）", MATERIAL_SOLID)
+        idx_material = 0 if self.cat.material != MATERIAL_SOLID else 1
+        self.cmb_material.setCurrentIndex(idx_material)
+        self.cmb_material.setToolTip(
+            "毛玻璃 = 截屏后模糊作为面板背景（Win10 上比系统亚克力流畅得多）；\n"
+            "纯色 = 只用背景色填充（v1.4 行为）。"
+        )
+
         form = QFormLayout()
         form.addRow("显示文字：", self.ed_label)
         form.addRow("图标尺寸：", self.sp_icon_px)
@@ -143,6 +162,7 @@ class SettingsDialog(QDialog):
         form.addRow("背景色：", self.btn_color)
         form.addRow("透明度：", opacity_row)
         form.addRow("弹出位置：", self.cmb_position)
+        form.addRow("面板材质：", self.cmb_material)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -156,9 +176,29 @@ class SettingsDialog(QDialog):
             lambda: self.open_folder_requested.emit(self.cat.id)
         )
 
+        # 「应用到全部分类」：把当前界面上的皮肤复制到所有分类（v1.5）
+        self.btn_apply_all = QPushButton(self._apply_all_default_text)
+        self.btn_apply_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_apply_all.setToolTip(
+            "把当前的面板宽高 / 圆角 / 背景色 / 透明度 / 弹出位置 / 材质\n"
+            "复制到全部分类（显示文字与图标保持各自独立）。"
+        )
+        self.btn_apply_all.clicked.connect(self._on_apply_all)
+        self.btn_apply_all.setEnabled(self.apply_all_handler is not None)
+        self._apply_all_timer = QTimer(self)
+        self._apply_all_timer.setSingleShot(True)
+        self._apply_all_timer.setInterval(APPLY_ALL_FEEDBACK_MS)
+        self._apply_all_timer.timeout.connect(self._reset_apply_all_text)
+
+        self.lb_apply_hint = QLabel("面板外观改动在重新打开面板后生效。")
+        self.lb_apply_hint.setWordWrap(True)
+        self.lb_apply_hint.setStyleSheet("color: #888;")
+
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(btn_open_folder)
+        layout.addWidget(self.btn_apply_all)
+        layout.addWidget(self.lb_apply_hint)
         layout.addWidget(buttons)
 
     def _update_color_button(self) -> None:
@@ -183,7 +223,12 @@ class SettingsDialog(QDialog):
 
     # -- 收集 ----------------------------------------------------------------
 
-    def _on_accept(self) -> None:
+    def _collect_into_cat(self) -> None:
+        """把界面上的值写回 ``self.cat``（不 accept、不发信号）。
+
+        OK 与「应用到全部分类」共用同一段收集逻辑：后者要先把当前界面值
+        落到源分类，controller 才能从源分类复制到其余分类。
+        """
         cat = self.cat
         label = self.ed_label.text().strip()
         cat.label = (label or cat.label)[:LABEL_MAX_CHARS]
@@ -194,6 +239,7 @@ class SettingsDialog(QDialog):
         cat.bg_color = self._bg_color
         cat.opacity = self.sl_opacity.value()
         cat.position_mode = self.cmb_position.currentData() or "anchor"
+        cat.material = self.cmb_material.currentData() or MATERIAL_BLUR
 
         image = self.ed_image.text().strip()
         if image:
@@ -203,12 +249,37 @@ class SettingsDialog(QDialog):
             self._image_source = ""
             self._image_cleared = True
         cat.sanitize()
-        if self._old_label != cat.label:
-            self.category_renamed.emit(cat.id)
+
+    def _on_apply_all(self) -> None:
+        """「应用到全部分类」：先收集当前界面值到源分类，再回调 controller。"""
+        handler = self.apply_all_handler
+        if handler is None:
+            return
+        self._collect_into_cat()
+        try:
+            count = int(handler(self.cat.id) or 0)
+        except Exception as exc:  # noqa: BLE001 - 反馈失败不能让对话框崩
+            logger.warning("应用到全部分类失败: %s", exc)
+            count = 0
+        self.btn_apply_all.setText(f"已应用到 {count} 个分类")
+        self._apply_all_timer.start()
+
+    def _reset_apply_all_text(self) -> None:
+        self.btn_apply_all.setText(self._apply_all_default_text)
+
+    def _on_accept(self) -> None:
+        self._collect_into_cat()
+        if self._old_label != self.cat.label:
+            self.category_renamed.emit(self.cat.id)
         self.settings_applied.emit()
         self.accept()
 
     # -- 对外属性 -------------------------------------------------------------
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """显示时再同步按钮可用性：controller 是在构造之后才注入回调的。"""
+        self.btn_apply_all.setEnabled(self.apply_all_handler is not None)
+        super().showEvent(event)
 
     @property
     def image_source(self) -> str:

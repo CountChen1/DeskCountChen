@@ -128,37 +128,41 @@ def install_proposed_fix(variant: str = "discard") -> tuple:
     """把候选补丁 monkeypatch 到 ``PanelWindow`` 上（不改源码）。
 
     Args:
-        variant: ``"defer"`` = 宽限内**推迟**复核（把 ``_check_deactivate``
-            再排一次）；``"discard"`` = 宽限内**丢弃**这次失活事件。
+        variant: ``"defer"`` = 宽限内**推迟**复核（反面教材，见下）；
+            ``"discard"`` = **不注入补丁**，直接跑产品当前实现。
 
-    两个变体的差别是本质的：推迟到宽限结束时面板**仍然不是前台**，于是照样
-    关（实测 v1 无效，见探针输出）；只有丢弃才能让"刚 show 的失活churn"不被
-    当成用户主动切走。
+    ## 为什么 discard 变体改成"不 patch"
+
+    早先两个变体都是手写实现，靠"丢弃 vs 推迟"的差别做对照。产品定版之后
+    （宽限内作废 **且** 用事件发生时刻 ``_deactivate_at`` 判宽限），手写的
+    ``discard`` 反而**落后于产品**：它拿"检查时刻"判宽限，于是 `show()+70ms`
+    的外点会因 ``+120ms`` 复核越过 300ms 而被关 —— 那是同一个 180ms 边界，
+    只是搬到了探针自己身上。
+
+    把 ``discard`` 改成"直接跑产品"，对照关系反而更硬：
+    **同一个 G1 用例，产品绿、defer 红** —— 这才是"探针能鉴别错误设计"的证据。
+
+    ``defer`` 仍然保留手写实现，因为它就是这个探针存在的理由：把"推迟复核"
+    这个看起来对、实际必死的写法钉在这儿，防止有人再改回去。
     """
     orig_show = PanelWindow.showEvent
     orig_check = PanelWindow._check_deactivate       # noqa: SLF001
+
+    if variant == "discard":
+        return orig_show, orig_check                 # 不注入：跑产品当前实现
 
     def show_event(self, event):                     # noqa: ANN001
         self._shown_at = time.monotonic()
         return orig_show(self, event)
 
-    if variant == "defer":
-        def _check_deactivate(self):                 # noqa: N802
-            if self.isVisible() and QApplication.activeWindow() is not self:
-                remain = SHOW_GRACE_S - (time.monotonic()
-                                         - getattr(self, "_shown_at", 0.0))
-                if remain > 0:
-                    QTimer.singleShot(int(remain * 1000) + 5, self._check_deactivate)
-                    return
-                self.close_with_reason("deactivate")
-    else:                                            # "discard"
-        def _check_deactivate(self):                 # noqa: N802
-            if not self.isVisible():
+    def _check_deactivate(self):                     # noqa: N802
+        if self.isVisible() and QApplication.activeWindow() is not self:
+            remain = SHOW_GRACE_S - (time.monotonic()
+                                     - getattr(self, "_shown_at", 0.0))
+            if remain > 0:
+                QTimer.singleShot(int(remain * 1000) + 5, self._check_deactivate)
                 return
-            if time.monotonic() - getattr(self, "_shown_at", 0.0) < SHOW_GRACE_S:
-                return          # show 后宽限内：这次失活视为"打开动作的 churn"，丢弃
-            if QApplication.activeWindow() is not self:
-                self.close_with_reason("deactivate")
+            self.close_with_reason("deactivate")
 
     PanelWindow.showEvent = show_event               # type: ignore[method-assign]
     PanelWindow._check_deactivate = _check_deactivate  # type: ignore[method-assign]
@@ -256,7 +260,11 @@ def g3_deactivate(app, controller) -> None:
     pump(app, 0.8)
     closed = controller.panel is None
     reason = getattr(pw, "close_reason", "")
-    check("G3 失焦 → 关闭且原因=deactivate", closed and reason == "deactivate",
+    # 原因允许 deactivate 或 focus-lost：设计中这两条都表示"用户切走了"，
+    # 谁先判定取决于事件派发时机（120ms 复核 vs 180ms 持续失焦），是竞争不是缺陷。
+    # 断言的是**行为**（失焦后面板关闭），不是**哪条路径先跑**。
+    check("G3 失焦 → 关闭（deactivate/focus-lost 皆可）",
+          closed and reason in ("deactivate", "focus-lost"),
           f"panel={'None' if closed else '仍打开'} reason={reason!r}")
     dummy.close()
     dummy.deleteLater()

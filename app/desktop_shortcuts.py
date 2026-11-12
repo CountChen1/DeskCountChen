@@ -12,9 +12,11 @@ v1.4 变更（入口改为 SAO Utils 2 的 HUD 图标）：
   安全红线：删除前必须用 shell_resolve 解析出 target/arguments，确认它指向
   本项目的 python(w).exe 且参数含 ``--open``；解析失败或目标不符一律跳过。
 
-设计（架构决策见 docs/design.md §10，v1.4 见 docs/SAO-接入.md）：
-- 快捷方式目标 = ``pythonw.exe <项目根>\\main.py --open <分类目录名>``，
+设计（架构决策见 docs/design.md §10，v1.4 见 docs/SAO-接入.md，v1.6 见 docs/deploy.md）：
+- 源码态快捷方式目标 = ``pythonw.exe <项目根>\\main.py --open <分类目录名>``，
   工作目录 = 项目根，图标 = 本模块生成的分类 .ico；
+- frozen（PyInstaller 打包）态目标 = ``DesktopBox.exe --open <分类目录名>``
+  （``sys.executable`` 就是产品 exe，无脚本参数），工作目录 = exe 所在目录；
 - .ico 缓存到 ``.icons/ico/<cat_id>.ico``，皮肤（image）或尺寸变化时重建；
 - 幂等同步：缺则补建、目标/图标/名字变化则重建、分类隐藏则删除；
 - **不重写没变化的 .lnk**（Windows 按路径缓存图标位置，无谓重写会引起重排），
@@ -277,10 +279,29 @@ class DesktopShortcutManager:
         self.icon_cache = icon_cache
         self.ico_dir = Path(ico_dir)
         self.state_path = Path(state_path)
-        self.project_root = Path(project_root) if project_root is not None else paths.APP_ROOT
+        self._frozen = getattr(sys, "frozen", False)
+        if project_root is not None:
+            self.project_root = Path(project_root)
+        elif self._frozen:
+            # frozen 态：工作目录 = 产品 exe 所在目录（部署根\<应用目录>）
+            self.project_root = Path(sys.executable).resolve().parent
+        else:
+            self.project_root = paths.APP_ROOT
         self.desktop_dir = Path(desktop_dir) if desktop_dir is not None else None
-        self.python_exe = python_exe or _default_python_exe()
-        self.script_path = Path(script_path) if script_path is not None else self.project_root / "main.py"
+        if python_exe is not None:
+            self.python_exe = str(python_exe)
+        elif self._frozen:
+            # frozen 态：.lnk 目标 = 产品 exe 自身（--open 参数见 _arguments）
+            self.python_exe = str(Path(sys.executable).resolve())
+        else:
+            self.python_exe = _default_python_exe()
+        if script_path is not None:
+            self.script_path: Path | None = Path(script_path)
+        elif self._frozen:
+            # frozen 态没有 main.py：目标直接是 exe，参数只有 --open
+            self.script_path = None
+        else:
+            self.script_path = self.project_root / "main.py"
         self.launcher_dir = Path(launcher_dir) if launcher_dir is not None else paths.LAUNCHERS_DIR
         self.mode = MODE_DESKTOP if str(mode) == MODE_DESKTOP else MODE_LAUNCHER
         self._auto_desktop: Path | None = None
@@ -700,14 +721,18 @@ class DesktopShortcutManager:
             logger.info("历史桌面快捷方式清理完成，state.where 已归一为 launcher")
 
     def _is_own_shortcut(self, path: Path) -> bool:
-        """该 .lnk 是否由本项目创建（target=python(w).exe 且参数含 --open）。"""
+        """该 .lnk 是否由本项目创建（target=python(w)/产品 exe 且参数含 --open）。"""
         info = shell_resolve.read_link(path)
         if not info.ok:
             logger.info("跳过删除（无法解析快捷方式，按用户文件处理）: %s", path)
             return False
         exe_name = Path(info.target).name.casefold() if info.target else ""
-        if exe_name not in ("python.exe", "pythonw.exe"):
-            logger.info("跳过删除（目标不是 python/pythonw）: %s → %s", path, info.target)
+        own_exes = {"python.exe", "pythonw.exe"}
+        if getattr(sys, "frozen", False):
+            # frozen 态我们自己的 .lnk 目标是产品 exe（如 DesktopBox.exe）
+            own_exes.add(Path(sys.executable).name.casefold())
+        if exe_name not in own_exes:
+            logger.info("跳过删除（目标不是本项目入口）: %s → %s", path, info.target)
             return False
         if "--open" not in info.arguments:
             logger.info("跳过删除（参数不含 --open）: %s → %s", path, info.arguments)
@@ -771,11 +796,13 @@ class DesktopShortcutManager:
         ))
 
     def _arguments(self, cat) -> str:
-        """``"<项目根>\\main.py" --open "<分类目录名>"``。
+        """``"<项目根>\\main.py" --open "<分类目录名>"``（frozen 态无脚本段）。
 
-        脚本必须出现在参数里（.lnk 的目标是解释器）；分类名可能含空格，
-        始终加引号。
+        源码态：脚本必须出现在参数里（.lnk 的目标是解释器）；分类名可能含
+        空格，始终加引号。frozen 态：目标就是产品 exe 自身，参数只有 ``--open``。
         """
+        if self.script_path is None:
+            return f'--open "{getattr(cat, "dir", "")}"'
         return f'"{self.script_path}" --open "{getattr(cat, "dir", "")}"'
 
     def _write_lnk(self, dest: Path, cat, ico_path: Path | None) -> bool:

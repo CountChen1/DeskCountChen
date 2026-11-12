@@ -105,6 +105,29 @@ class FrozenShortcutTargetTests(unittest.TestCase):
                     '--open "常用"',
                 )
 
+    def test_frozen_target_override_in_source_process(self) -> None:
+        """B4 迁移工具场景：源码进程里显式 frozen_target=True 必须生效。
+
+        实测踩过：迁移脚本从源码 venv 运行，按进程检测 _frozen=False，
+        script_path 被自动补成 main.py，错误参数写进了 .lnk。
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            mgr = DesktopShortcutManager(
+                icon_cache=_StubIcons(),
+                ico_dir=Path(td) / "ico",
+                state_path=Path(td) / "state.json",
+                launcher_dir=Path(td) / "launchers",
+                desktop_dir=Path(td) / "desktop",
+                python_exe=str(self.FROZEN_EXE),
+                script_path=None,
+                frozen_target=True,
+            )
+            self.assertIsNone(mgr.script_path)
+            self.assertEqual(Path(mgr.python_exe), self.FROZEN_EXE)
+            self.assertEqual(mgr.project_root, self.FROZEN_EXE.parent)
+
     def test_source_mode_arguments_keep_script(self) -> None:
         """源码态回归：参数必须仍带 main.py（不被 frozen 分支波及）。"""
         import tempfile

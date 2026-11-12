@@ -85,6 +85,7 @@ def main() -> int:
         project_root=exe.parent,
         python_exe=str(exe),
         script_path=None,          # frozen 语义：参数只有 --open
+        frozen_target=True,        # 源码进程里强制 frozen 语义（否则会被补成 main.py）
         mode=cfg.app.shortcut_mode,
         launcher_dir=app_dir / ".launchers",
     )

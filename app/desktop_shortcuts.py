@@ -260,6 +260,7 @@ class DesktopShortcutManager:
         script_path: Path | None = None,
         mode: str = MODE_LAUNCHER,
         launcher_dir: Path | None = None,
+        frozen_target: bool | None = None,
     ) -> None:
         """
         Args:
@@ -275,18 +276,17 @@ class DesktopShortcutManager:
             mode: ``"launcher"``（默认，写 launcher_dir，绝不碰桌面）或
                 ``"desktop"``（v1.3 行为）；非法值按 launcher 处理。
             launcher_dir: 启动器 .lnk 目录；None = ``paths.LAUNCHERS_DIR``。
+            frozen_target: 显式指定 .lnk 目标语义（B4 迁移工具用）。None =
+                按当前进程 ``sys.frozen`` 自动判断；True = 即使在源码态进程里
+                也按 frozen 语义取默认值（目标 = exe + 仅 ``--open`` 参数）。
+                迁移脚本从源码 venv 运行但要求生成 frozen 形态的 .lnk，
+                按进程检测会得出错误结论（实测踩过：参数被塞进 main.py）。
         """
         self.icon_cache = icon_cache
         self.ico_dir = Path(ico_dir)
         self.state_path = Path(state_path)
-        self._frozen = getattr(sys, "frozen", False)
-        if project_root is not None:
-            self.project_root = Path(project_root)
-        elif self._frozen:
-            # frozen 态：工作目录 = 产品 exe 所在目录（部署根\<应用目录>）
-            self.project_root = Path(sys.executable).resolve().parent
-        else:
-            self.project_root = paths.APP_ROOT
+        self._frozen = (getattr(sys, "frozen", False)
+                        if frozen_target is None else bool(frozen_target))
         self.desktop_dir = Path(desktop_dir) if desktop_dir is not None else None
         if python_exe is not None:
             self.python_exe = str(python_exe)
@@ -295,6 +295,15 @@ class DesktopShortcutManager:
             self.python_exe = str(Path(sys.executable).resolve())
         else:
             self.python_exe = _default_python_exe()
+        if project_root is not None:
+            self.project_root = Path(project_root)
+        elif self._frozen:
+            # frozen 态：工作目录 = 目标 exe 所在目录。从 python_exe 推导
+            # （真实 frozen 运行时它就是 sys.executable；frozen_target=True
+            # 的源码进程里 sys.executable 是解释器，不能拿来当产品目录）
+            self.project_root = Path(self.python_exe).resolve().parent
+        else:
+            self.project_root = paths.APP_ROOT
         if script_path is not None:
             self.script_path: Path | None = Path(script_path)
         elif self._frozen:

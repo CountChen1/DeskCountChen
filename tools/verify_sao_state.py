@@ -244,19 +244,33 @@ def main() -> int:
     got_icos = {p.name for p in ico_dir.glob("*.ico")} if ico_dir.is_dir() else set()
     check(".icons/ico 无多余 .ico", got_icos <= want_icos, str(sorted(got_icos - want_icos)))
 
-    # 10 桌面干净
+    # 10 桌面上的本程序 .lnk 必须是启动器目录的投影（不能指向旧 exe）
+    #
+    # 判定口径（v2.0 更名后修正）：不再要求"桌面一个都没有"——用户可能刻意把
+    # 启动器 .lnk 放到桌面双击。真正要防的是**过期副本**：桌面同名 .lnk 的目标
+    # 必须与 .launchers 里的权威副本逐字节一致。旧版口径是"含 desktopbox 或
+    # --open 即算残留"，更名后连正确的新 .lnk 也会被误判，故改为比对目标。
     desk = real_desktop()
     stale = []
     if desk.is_dir():
+        authority = {p.name: p for p in launchers_dir.glob("启动-*.lnk")}
         for p in desk.glob("*.lnk"):
             try:
                 lt = read_link(p)
             except Exception:
                 continue
-            blob = f"{lt.target} {lt.arguments}".lower()
-            if "desktopbox" in blob or "--open" in blob:
-                stale.append(p.name)
-    check("桌面无本程序 .lnk", not stale, str(stale))
+            if "--open" not in (lt.arguments or ""):
+                continue  # 不是本程序的快捷方式（--open 是本产品特有参数）
+            ref = authority.get(p.name)
+            if ref is None:
+                stale.append(f"{p.name}（启动器目录无同名权威副本）")
+                continue
+            rt = read_link(ref)
+            got = f"{lt.target} {lt.arguments}".strip()
+            want = f"{rt.target} {rt.arguments}".strip()
+            if got != want:
+                stale.append(f"{p.name}（指向 {lt.target}，应为 {rt.target}）")
+    check("桌面本程序 .lnk 均指向当前 exe", not stale, str(stale))
 
     return _finish(args)
 

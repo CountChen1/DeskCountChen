@@ -32,9 +32,21 @@ E:\desktopbox\
 .venv\Scripts\python.exe tools\build_dist.py
 ```
 
-脚本做四件事：缺 PyInstaller 则装入 venv → 清理旧 build/dist → PyInstaller
-onedir + windowed（无控制台）打包 main.py，排除 tests/docs/tools →
-自动跑 `dist\DeskCountChen\DeskCountChen.exe --selfcheck`（退出码非 0 即失败）。
+脚本做五件事：缺 PyInstaller 则装入 venv → 生成构建指纹 `app\build_info.py`
+（git commit + 构建时间）→ 确保 `assets\app.ico` 存在 → 清理旧 build/dist →
+PyInstaller onedir + windowed 打包 main.py（带 `--icon` 与 `--version-file`）→
+自动跑 `--selfcheck`（退出码非 0 即失败）并读 `--version` 校验品牌与版本号。
+
+### 2.1 发布包里的三处身份标识（防伪，不是防破解）
+
+| 位置 | 内容 | 为什么改不掉 |
+|---|---|---|
+| PE 版本资源 | `CompanyName=CountChen`、`ProductName=Desk CountChen`、`LegalCopyright`、`OriginalFilename` | 写进 exe 资源段，资源管理器「属性 → 详细信息」直接可见；改名者必须重新打包，且容易漏改 |
+| 构建指纹 | `Desk CountChen v2.0.0 (build <commit>, <时间>)` | 由 `--version` 与托盘「关于」输出；第三方重编译的 commit 必然与官方 Release 标签对不上 |
+| LICENSE / NOTICE | Apache-2.0 正文 + 归属声明 + PySide6 LGPL-3.0 声明 | 删掉即构成许可违约，是下架请求的书面依据 |
+
+> PySide6 走 LGPL-3.0：必须保持 Qt DLL 以独立文件形式随包（onedir 天然满足，
+> 这也是本项目**不用 onefile** 的原因之一），并随包附带 NOTICE。
 
 **分享给别人**：把 `dist\DeskCountChen\` 整个目录压缩发给对方即可——
 对方解压到任意目录运行 `DeskCountChen.exe`，首次启动自动建 `\data` 和默认配置。
@@ -65,6 +77,10 @@ onedir + windowed（无控制台）打包 main.py，排除 tests/docs/tools →
   ← 逐字节复制自 `E:\desktopbox\data\.launchers\启动-*.lnk`
   ← 由 `tools\rebuild_launchers_frozen.py` 用产品 exe 重建。
 - 单击 HUD 图标 → 起第二实例 → 单实例唤醒 → 第一实例弹面板。
+- **桌面上的同名 .lnk 是启动器目录的投影，不是第二个事实来源**：如果为了双击方便
+  把 `启动-*.lnk` 放到桌面，它必须与 `E:\desktopbox\data\.launchers\` 里的权威副本
+  目标一致。`tools\verify_sao_state.py` 的第 43 项就是这条判据——它抓的是"过期副本"
+  （仍指向旧 exe），而不是"桌面上有没有快捷方式"。
 
 ## 5. 本次迁移记录（2026-11-13，C 盘 → E 盘）
 

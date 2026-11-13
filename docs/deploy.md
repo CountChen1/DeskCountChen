@@ -48,6 +48,12 @@ PyInstaller onedir + windowed 打包 main.py（带 `--icon` 与 `--version-file`
 > PySide6 走 LGPL-3.0：必须保持 Qt DLL 以独立文件形式随包（onedir 天然满足，
 > 这也是本项目**不用 onefile** 的原因之一），并随包附带 NOTICE。
 
+**发布 GitHub**：双击仓库根目录的 `publish.bat`。它依次做六步，全部幂等
+（中途失败修好后重跑即可）：读版本号（`findstr` 从 `app\__init__.py` 取，
+不另写第二份）→ 校验工作区干净 → 打 `v<版本>` 标签 → 首次运行会要求粘贴
+GitHub 空仓库地址 → 推送 master + 标签（首次弹 GitHub 登录窗）→ 用
+Compress-Archive 生成 `dist\DeskCountChen-<版本>-win64.zip` 供 Release 挂载。
+
 **分享给别人**：把 `dist\DeskCountChen\` 整个目录压缩发给对方即可——
 对方解压到任意目录运行 `DeskCountChen.exe`，首次启动自动建 `\data` 和默认配置。
 对方是"从零开始"的全新用户；如果想连配置/图标一起给，把 `\data` 也一起打包

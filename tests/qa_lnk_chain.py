@@ -13,7 +13,7 @@
 
 现场保护（2026-11-12 事故后重做）：
 - ``app.paths`` 整个命名空间重定向到临时沙箱（配置 / .icons / .ico / 数据根 /
-  .launchers），真实 ``%USERPROFILE%\\DesktopBox`` 只读一次取 sha256 指纹；
+  .launchers），真实 ``%USERPROFILE%\\DeskCountChen`` 只读一次取 sha256 指纹；
 - 落点不用真实桌面 —— 用沙箱里的临时目录 + 真实 COM（测的是"写 .lnk 的能力"，
   不是"是否恰好叫桌面"）；真实桌面只做**只读**核对：前后 .lnk 集合必须一致；
 - 结束时删沙箱，并断言真实配置 sha256 未变；

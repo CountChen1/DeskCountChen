@@ -1,8 +1,8 @@
 """分类"启动器"快捷方式全生命周期管理（.ico 生成 + .lnk 落点同步）。
 
 v1.4 变更（入口改为 SAO Utils 2 的 HUD 图标）：
-- 用户实际点的是 SAO Utils 2 的 HUD 图标，DesktopBox **不再往真实桌面写 .lnk**；
-  改为在私有目录 ``%USERPROFILE%\\DesktopBox\\.launchers`` 生成
+- 用户实际点的是 SAO Utils 2 的 HUD 图标，DeskCountChen **不再往真实桌面写 .lnk**；
+  改为在私有目录 ``%USERPROFILE%\\DeskCountChen\\.launchers`` 生成
   ``启动-<分类>.lnk``，供 SAO 的 "Change Action → 选择 .lnk" 引用。
   单击 = 起第二个实例 → 单实例唤醒 → 第一实例弹面板（Win+D 后依旧在）。
 - ``mode`` 决定落点：
@@ -15,7 +15,7 @@ v1.4 变更（入口改为 SAO Utils 2 的 HUD 图标）：
 设计（架构决策见 docs/design.md §10，v1.4 见 docs/SAO-接入.md，v1.6 见 docs/deploy.md）：
 - 源码态快捷方式目标 = ``pythonw.exe <项目根>\\main.py --open <分类目录名>``，
   工作目录 = 项目根，图标 = 本模块生成的分类 .ico；
-- frozen（PyInstaller 打包）态目标 = ``DesktopBox.exe --open <分类目录名>``
+- frozen（PyInstaller 打包）态目标 = ``DeskCountChen.exe --open <分类目录名>``
   （``sys.executable`` 就是产品 exe，无脚本参数），工作目录 = exe 所在目录；
 - .ico 缓存到 ``.icons/ico/<cat_id>.ico``，皮肤（image）或尺寸变化时重建；
 - 幂等同步：缺则补建、目标/图标/名字变化则重建、分类隐藏则删除；
@@ -36,7 +36,7 @@ from pathlib import Path
 from PySide6.QtCore import QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage, QPixmap
 
-from app import paths
+from app import brand, paths
 from app.config import (
     SHORTCUT_MODE_DESKTOP,
     SHORTCUT_MODE_LAUNCHER,
@@ -652,7 +652,7 @@ class DesktopShortcutManager:
         """启动器目录是否踩线；返回拒绝原因，空串表示通过。
 
         为什么要有这道防线：启动器 .lnk 是"给 SAO HUD 图标引用的入口文件"，
-        必须待在 ``%USERPROFILE%\\DesktopBox\\.launchers``。一旦某个调用方把
+        必须待在 ``%USERPROFILE%\\DeskCountChen\\.launchers``。一旦某个调用方把
         ``launcher_dir`` 传成用户**数据根**（例如 ``E:\\快捷方式SAO``），
         6 个 ``启动-*.lnk`` 就会直接落在用户自己的分类数据根上，混在用户目录里——
         这是"动了用户数据"，属于必须无条件拦住的事，跟调用方写没写错无关。
@@ -738,7 +738,7 @@ class DesktopShortcutManager:
         exe_name = Path(info.target).name.casefold() if info.target else ""
         own_exes = {"python.exe", "pythonw.exe"}
         if getattr(sys, "frozen", False):
-            # frozen 态我们自己的 .lnk 目标是产品 exe（如 DesktopBox.exe）
+            # frozen 态我们自己的 .lnk 目标是产品 exe（如 DeskCountChen.exe）
             own_exes.add(Path(sys.executable).name.casefold())
         if exe_name not in own_exes:
             logger.info("跳过删除（目标不是本项目入口）: %s → %s", path, info.target)
@@ -821,7 +821,7 @@ class DesktopShortcutManager:
             arguments=self._arguments(cat),
             working_dir=str(self.project_root),
             icon_path=str(ico_path) if ico_path else str(self.python_exe),
-            description=f"DesktopBox 分类：{getattr(cat, 'label', '')}",
+            description=f"{brand.PRODUCT_NAME} 分类：{getattr(cat, 'label', '')}",
         )
 
     def _delete_lnk(self, base_dir: Path, name: str) -> None:

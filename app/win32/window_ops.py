@@ -1,4 +1,4 @@
-"""Win32 通用能力封装（DesktopBox 唯一的 ctypes 边界，除 shell_link 外）。
+"""Win32 通用能力封装（DeskCountChen 唯一的 ctypes 边界，除 shell_link 外）。
 
 约定：
 - 除 ``shell_open`` 外，所有函数不抛异常，失败返回安全默认值并记录日志。
@@ -17,6 +17,7 @@ import ctypes
 import logging
 from pathlib import Path
 
+from app import brand
 from app.win32 import consts
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ __all__ = [
 _mutex_handle = None
 
 # 单实例互斥量名称（Local 命名空间 = 每个登录会话一份）
-MUTEX_NAME = "Local\\DesktopBox.SingleInstance.Mutex"
+MUTEX_NAME = "Local\\DeskCountChen.SingleInstance.Mutex"
 
 
 def set_file_hidden(path: Path) -> None:
@@ -120,7 +121,7 @@ def release_single_instance_mutex() -> None:
         _mutex_handle = None
 
 
-def set_app_user_model_id(app_id: str = "WorkBuddy.DesktopBox") -> None:
+def set_app_user_model_id(app_id: str = brand.APP_USER_MODEL_ID) -> None:
     """设置进程 AppUserModelID（让任务栏归属正确）。"""
     try:
         consts._SetCurrentProcessExplicitAppUserModelID(app_id)

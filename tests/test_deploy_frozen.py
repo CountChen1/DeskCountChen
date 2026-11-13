@@ -8,7 +8,7 @@
 | APP_DIR 解析 | :func:`app.paths.resolve_app_dir` 纯函数断言（源码态 / frozen 默认 / 环境变量优先） |
 | .lnk 目标 | frozen 态 DesktopShortcutManager 默认目标 = sys.executable、无脚本参数 |
 | 参数形态 | frozen 态 ``--open "分类"``（不含 main.py） |
-| 自有判定 | frozen 态 ``_is_own_shortcut`` 认得 DesktopBox.exe 目标的 .lnk |
+| 自有判定 | frozen 态 ``_is_own_shortcut`` 认得 DeskCountChen.exe 目标的 .lnk |
 """
 
 from __future__ import annotations
@@ -30,29 +30,29 @@ class ResolveAppDirTests(unittest.TestCase):
 
     def test_source_mode_uses_userprofile(self) -> None:
         out = paths.resolve_app_dir(False, "whatever/python.exe", userprofile=r"C:\Users\Z")
-        self.assertEqual(out, Path(r"C:\Users\Z") / "DesktopBox")
+        self.assertEqual(out, Path(r"C:\Users\Z") / "DeskCountChen")
 
     def test_source_mode_home_fallback(self) -> None:
         out = paths.resolve_app_dir(False, "whatever/python.exe", userprofile=None)
-        self.assertEqual(out.name, "DesktopBox")
+        self.assertEqual(out.name, "DeskCountChen")
         self.assertTrue(out.is_absolute())
 
     def test_frozen_default_is_deploy_root_data(self) -> None:
-        """E:\\desktopbox\\DesktopBox\\DesktopBox.exe → E:\\desktopbox\\data。"""
+        """E:\\desktopbox\\DeskCountChen\\DeskCountChen.exe → E:\\desktopbox\\data。"""
         out = paths.resolve_app_dir(
-            True, r"E:\desktopbox\DesktopBox\DesktopBox.exe", desktopbox_home=None)
-        self.assertEqual(out, Path(r"E:\desktopbox\DesktopBox").parent / "data")
+            True, r"E:\desktopbox\DeskCountChen\DeskCountChen.exe", desktopbox_home=None)
+        self.assertEqual(out, Path(r"E:\desktopbox\DeskCountChen").parent / "data")
         self.assertEqual(out, Path(r"E:\desktopbox") / "data")
 
     def test_frozen_env_var_wins(self) -> None:
         out = paths.resolve_app_dir(
-            True, r"E:\desktopbox\DesktopBox\DesktopBox.exe",
-            desktopbox_home=r"D:\ anywhere\DesktopBoxHome")
-        self.assertEqual(out, Path(r"D:\ anywhere\DesktopBoxHome"))
+            True, r"E:\desktopbox\DeskCountChen\DeskCountChen.exe",
+            desktopbox_home=r"D:\ anywhere\DeskCountChenHome")
+        self.assertEqual(out, Path(r"D:\ anywhere\DeskCountChenHome"))
 
     def test_frozen_blank_env_ignored(self) -> None:
         out = paths.resolve_app_dir(
-            True, r"E:\desktopbox\DesktopBox\DesktopBox.exe", desktopbox_home="   ")
+            True, r"E:\desktopbox\DeskCountChen\DeskCountChen.exe", desktopbox_home="   ")
         self.assertEqual(out, Path(r"E:\desktopbox") / "data")
 
     def test_frozen_deep_exe_still_parent_parent(self) -> None:
@@ -68,9 +68,9 @@ class _StubIcons:
 
 
 class FrozenShortcutTargetTests(unittest.TestCase):
-    """frozen 态 .lnk 目标 = 产品 exe（DesktopBox.exe）+ --open 参数。"""
+    """frozen 态 .lnk 目标 = 产品 exe（DeskCountChen.exe）+ --open 参数。"""
 
-    FROZEN_EXE = Path(r"E:\desktopbox\DesktopBox\DesktopBox.exe")
+    FROZEN_EXE = Path(r"E:\desktopbox\DeskCountChen\DeskCountChen.exe")
 
     def _manager(self, tmp: Path) -> DesktopShortcutManager:
         return DesktopShortcutManager(
@@ -166,7 +166,7 @@ class FrozenShortcutTargetTests(unittest.TestCase):
             self.assertTrue(shell_link.create_shortcut(
                 dest=dest, target=str(self.FROZEN_EXE),
                 arguments='--open "常用"', working_dir=str(self.FROZEN_EXE.parent),
-                icon_path=str(self.FROZEN_EXE), description="DesktopBox 分类：常用",
+                icon_path=str(self.FROZEN_EXE), description="DeskCountChen 分类：常用",
             ))
             with patch.object(sys, "frozen", True, create=True), \
                  patch.object(sys, "executable", str(self.FROZEN_EXE)):
@@ -174,7 +174,7 @@ class FrozenShortcutTargetTests(unittest.TestCase):
                 self.assertTrue(mgr._is_own_shortcut(dest))   # noqa: SLF001
             # 源码态（未 patch frozen）下同一个 .lnk 不是"python 目标"——
             # 但源码态运行时 sys.executable 是 python.exe，own_exes 不含
-            # DesktopBox.exe → 判 False（保守：不确定就不删）。
+            # DeskCountChen.exe → 判 False（保守：不确定就不删）。
             mgr2 = self._manager(tmp)
             self.assertFalse(mgr2._is_own_shortcut(dest))    # noqa: SLF001
 

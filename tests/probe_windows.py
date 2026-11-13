@@ -29,7 +29,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 PYEXE = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 MAIN = PROJECT_ROOT / "main.py"
-DATA_ROOT = Path(os.environ.get("USERPROFILE", "")) / "DesktopBox"
+DATA_ROOT = Path(os.environ.get("USERPROFILE", "")) / "DeskCountChen"
 LOG_FILE = DATA_ROOT / ".logs" / "app.log"
 CONFIG = DATA_ROOT / ".config.json"
 

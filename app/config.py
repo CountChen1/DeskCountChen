@@ -16,7 +16,7 @@ v1.2 语义重整（桌面图标改为 Windows 真实快捷方式）：
   保存时自然不会写回。
 
 v1.4 新增（入口改为 SAO Utils 2 的 HUD 图标）：
-- ``app.data_root``：分类数据根（空 = 默认 ``%USERPROFILE%\\DesktopBox``）；
+- ``app.data_root``：分类数据根（空 = 默认 ``%USERPROFILE%\\DeskCountChen``）；
 - ``app.category_exclude``：自动登记分类时要跳过的目录名（大小写不敏感；
   6 个 SAO 目录里 ``快捷方式`` / ``桌面`` / ``z全部`` 不是分类）；
 - ``app.shortcut_mode``：``"launcher"``（写私有启动器 .lnk 给 SAO 引用，
@@ -177,7 +177,7 @@ class Settings:
     watch_poll_ms: int = 1000        # 目录轮询签名比对
 
     # -- v1.4 新增 --------------------------------------------------------
-    data_root: str = ""              # 分类数据根；""= 默认 %USERPROFILE%\DesktopBox
+    data_root: str = ""              # 分类数据根；""= 默认 %USERPROFILE%\DeskCountChen
     category_exclude: list[str] = field(
         default_factory=lambda: list(DEFAULT_CATEGORY_EXCLUDE)
     )

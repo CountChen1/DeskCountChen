@@ -3,7 +3,7 @@
 ## 为什么必须有这个模块（事故复盘 2026-11-12）
 
 e2e / 回归脚本会写配置、建分类目录、生成 ``.ico`` / ``.lnk``。这些路径一旦指向
-真实的 ``%USERPROFILE%\\DesktopBox``，就会覆盖用户的正式配置 —— 实际发生过一次：
+真实的 ``%USERPROFILE%\\DeskCountChen``，就会覆盖用户的正式配置 —— 实际发生过一次：
 6 个 SAO 分类被测试夹具冲掉、``data_root`` 退回默认值。
 
 原来的"跑前备份 + ``finally`` 无条件还原"看起来能救，**但它不是修复**：
@@ -125,7 +125,7 @@ def _assert_isolated(root: Path) -> None:
 
     这是为了防止"看起来沙箱了、其实还有一条路指向真实目录"的假隔离
     —— 例如 ``ensure_base_dirs()`` 走的是 ``paths._BASE_DIRS``，漏同步就会去真实
-    ``%USERPROFILE%\\DesktopBox`` 建目录；又例如有人把 ``DATA_ROOT`` 落回真实盘，
+    ``%USERPROFILE%\\DeskCountChen`` 建目录；又例如有人把 ``DATA_ROOT`` 落回真实盘，
     ``AppController._ensure_categories()`` 就会去扫真实目录并把残留的 ``常用``
     登记成分类、进而往落点写 ``启动-常用.lnk``。
     """

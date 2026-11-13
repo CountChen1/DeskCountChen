@@ -4,12 +4,12 @@
 
 v1.5 给每个分类新增了 ``material`` 字段，**任何一次真实启动都会把配置重写成
 带 material 的版本**（``AppConfig.load → save`` 实测 sha256 从 ``fc1ca55b…``
-变成 ``61117c40…``）。若直接用真实 ``%USERPROFILE%\\DesktopBox``，验收就必然
+变成 ``61117c40…``）。若直接用真实 ``%USERPROFILE%\\DeskCountChen``，验收就必然
 改写用户配置，违背「数据零污染」红线。
 
 因此本脚本：
 
-1. 只**读**真实配置，把它复制到临时 ``USERPROFILE\\DesktopBox\\.config.json``
+1. 只**读**真实配置，把它复制到临时 ``USERPROFILE\\DeskCountChen\\.config.json``
    （``app.data_root`` 仍指向真实 ``E:\\快捷方式SAO``）；
 2. 用 ``USERPROFILE=<临时目录>`` 起真进程 → ``paths.APP_DIR`` 落在临时目录，
    ``.icons / .ico / .launchers / .logs`` 全部在临时目录重建；
@@ -40,7 +40,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 REAL_HOME = Path(os.environ.get("USERPROFILE", str(Path.home())))
-REAL_CONFIG = REAL_HOME / "DesktopBox" / ".config.json"
+REAL_CONFIG = REAL_HOME / "DeskCountChen" / ".config.json"
 OUT_DIR = Path(os.environ.get("TEMP", ".")) / "qa_v15"
 WORK = OUT_DIR / "e2e_home"          # 隔离的 USERPROFILE
 EXPECTED_ROOT = r"E:\快捷方式SAO"
@@ -62,7 +62,7 @@ def info(msg: str) -> None:
 
 def prepare_home() -> Path:
     """建隔离 USERPROFILE，并把真实配置复制进去。"""
-    app_dir = WORK / "DesktopBox"
+    app_dir = WORK / "DeskCountChen"
     if WORK.exists():
         shutil.rmtree(WORK, ignore_errors=True)
     (app_dir / ".logs").mkdir(parents=True, exist_ok=True)
@@ -126,13 +126,13 @@ def main() -> int:
         return 2
     kill_stale()
     home = prepare_home()
-    app_dir = home / "DesktopBox"
+    app_dir = home / "DeskCountChen"
     log_file = app_dir / ".logs" / "app.log"
     crash_file = app_dir / ".logs" / "crash.log"
 
     env = dict(os.environ)
     env["USERPROFILE"] = str(home)
-    env["DESKTOPBOX_DEBUG"] = "0"
+    env["DESKCOUNTCHEN_DEBUG"] = "0"
     env.pop("QT_QPA_PLATFORM", None)
 
     stdout_path = OUT_DIR / "e2e_first_stdout.log"
@@ -147,7 +147,7 @@ def main() -> int:
                 stdout=out, stderr=subprocess.STDOUT,
             )
         info(f"第一实例 pid={first.pid}，等待启动（最多 {STARTUP_TIMEOUT_S:.0f}s）")
-        ok_started, lines = wait_for(log_file, "DesktopBox 启动完成", STARTUP_TIMEOUT_S)
+        ok_started, lines = wait_for(log_file, "DeskCountChen 启动完成", STARTUP_TIMEOUT_S)
         check("F1 第一实例在超时内完成启动（日志出现「启动完成」）", ok_started,
               f"{len(lines)} 行日志")
         text = "\n".join(lines)
@@ -194,7 +194,7 @@ def main() -> int:
         tail = "\n".join(read_log(log_file)[-12:])
         info("日志尾部：\n" + "\n".join(f"    {ln}" for ln in read_log(log_file)[-8:]))
         check("F11 唤醒链路日志完整（已有实例 → 已请求 → 面板已打开）",
-              "已有 DesktopBox 实例在运行" in tail
+              "已有 DeskCountChen 实例在运行" in tail
               and "已请求已有实例打开分类" in tail,
               "三段日志齐备" if "已请求已有实例打开分类" in tail else "缺环节")
     finally:
@@ -209,7 +209,7 @@ def main() -> int:
                 info(f"{name} 已终止（returncode={proc.poll()}）")
         time.sleep(1.5)
         leftover = _leftover()
-        check("F12 结束后无残留 DesktopBox 进程", not leftover,
+        check("F12 结束后无残留 DeskCountChen 进程", not leftover,
               "; ".join(leftover) if leftover else "无")
 
     failed = [n for n, ok, _ in RESULTS if not ok]

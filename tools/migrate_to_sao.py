@@ -1,11 +1,11 @@
-"""配置迁移脚本：把 DesktopBox 切到"SAO Utils 2 入口 + E 盘数据根"。
+"""配置迁移脚本：把 DeskCountChen 切到"SAO Utils 2 入口 + E 盘数据根"。
 
-背景（v1.4）：桌面图标入口交给 SAO Utils 2 的 HUD 图标。DesktopBox 不再往
-桌面写 .lnk，改为在私有目录 ``%USERPROFILE%\\DesktopBox\\.launchers`` 生成
+背景（v1.4）：桌面图标入口交给 SAO Utils 2 的 HUD 图标。DeskCountChen 不再往
+桌面写 .lnk，改为在私有目录 ``%USERPROFILE%\\DeskCountChen\\.launchers`` 生成
 ``启动-<分类>.lnk``，供 SAO 的 "Change Action" 引用。
 
 本脚本做三件事（**幂等，可重复执行**）：
-1. 备份现有 ``%USERPROFILE%\\DesktopBox\\.config.json`` 到同目录
+1. 备份现有 ``%USERPROFILE%\\DeskCountChen\\.config.json`` 到同目录
    ``.config.json.bak-<YYYYmmdd-HHMMSS>``（备份失败立即中止，绝不先改配置）；
 2. 写入新配置：``app.data_root = E:\\快捷方式SAO``、``app.shortcut_mode = launcher``、
    ``category_exclude`` 用默认值；分类集合 = 数据根下真实存在的这 6 个目录
@@ -15,10 +15,10 @@
 3. 用 offscreen QApplication 调 ``DesktopShortcutManager.sync()`` 生成启动器
    .lnk 并打印路径。
 
-**安全红线**：只写 ``%USERPROFILE%\\DesktopBox``（配置 + .launchers + .icons），
+**安全红线**：只写 ``%USERPROFILE%\\DeskCountChen``（配置 + .launchers + .icons），
 绝不写 / 改 / 删 ``E:\\快捷方式SAO`` 下的任何文件（只读取目录名判断分类）。
 
-**执行顺序至关重要**：DesktopBox **必须先退出**。运行中的旧实例内存里是旧配置，
+**执行顺序至关重要**：DeskCountChen **必须先退出**。运行中的旧实例内存里是旧配置，
 它退出时会把旧配置写回磁盘，迁移成果会被静默覆盖。脚本会用单实例互斥量探测，
 发现有实例在跑就中止（除非显式 ``--force``）。
 
@@ -45,7 +45,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 TARGET_DATA_ROOT = r"E:\快捷方式SAO"
 CATEGORY_DIRS = ("游戏加速", "影音娱乐", "工作学习", "社交通讯", "系统硬件", "文档下载")
 LEGACY_SKIN_SOURCE_DIR = "常用"     # 皮肤模板来源（旧"常用"分类）
-MUTEX_NAME = r"Local\DesktopBox.SingleInstance.Mutex"
+MUTEX_NAME = r"Local\DeskCountChen.SingleInstance.Mutex"
 ERROR_ALREADY_EXISTS = 183
 DEFAULT_SKIN = {                    # 旧"常用"不存在时的兜底（与用户当前皮肤一致）
     "icon_px": 64,
@@ -59,11 +59,11 @@ DEFAULT_SKIN = {                    # 旧"常用"不存在时的兜底（与用�
 
 
 def desktopbox_running() -> bool:
-    """是否已有 DesktopBox 实例在跑（用单实例互斥量探测，只读不打断）。
+    """是否已有 DeskCountChen 实例在跑（用单实例互斥量探测，只读不打断）。
 
     为什么必须检测：正在运行的旧实例内存里是**旧配置**，它退出时会把自己的
     配置写回磁盘 —— 迁移成果会被静默覆盖，用户下次启动拿到的是旧数据根。
-    所以正确顺序永远是"先退出 DesktopBox → 再迁移 → 再启动新版"。
+    所以正确顺序永远是"先退出 DeskCountChen → 再迁移 → 再启动新版"。
     """
     try:
         import ctypes
@@ -197,12 +197,12 @@ def main(argv: list[str] | None = None) -> int:
     # 运行中的旧实例会在退出时把旧配置写回磁盘 → 必须先退出再迁移
     if desktopbox_running() and not dry_run:
         if not force:
-            print("[中止] 检测到 DesktopBox 正在运行。")
+            print("[中止] 检测到 DeskCountChen 正在运行。")
             print("      运行中的实例内存里是旧配置，它退出时会把旧配置写回，")
             print("      迁移结果会被静默覆盖。请先：托盘图标 → 退出，然后重跑本脚本。")
             print("      （确知风险仍要继续可加 --force）")
             return 2
-        print("[警告] DesktopBox 正在运行：迁移后请**立即**让它退出并重启新版，")
+        print("[警告] DeskCountChen 正在运行：迁移后请**立即**让它退出并重启新版，")
         print("       否则旧实例退出时可能覆盖新配置。")
 
     # ---- 1. 备份（必须先成功） -----------------------------------------
@@ -296,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         for item in missing_lnk:
             print(f"      {item}")
         return 1
-    print("\n迁移完成：桌面上的旧 DesktopBox 快捷方式已按「确认指向本项目」规则清理。")
+    print("\n迁移完成：桌面上的旧 DeskCountChen 快捷方式已按「确认指向本项目」规则清理。")
     return 0
 
 

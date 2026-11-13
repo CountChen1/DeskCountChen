@@ -7,7 +7,7 @@
 2. **立即落盘** —— 点按钮后配置文件里就应该是新值（不等 400ms 去抖）。
 
 现场保护：``app.paths`` 整体重定向到临时沙箱（``tests/sandbox.py``），
-真实 ``%USERPROFILE%\\DesktopBox`` 只读一次取 sha256 指纹，结束时断言零改动。
+真实 ``%USERPROFILE%\\DeskCountChen`` 只读一次取 sha256 指纹，结束时断言零改动。
 """
 
 from __future__ import annotations

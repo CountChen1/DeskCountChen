@@ -100,7 +100,7 @@ class SettingsV14Tests(unittest.TestCase):
 
     def test_defaults(self) -> None:
         s = Settings()
-        self.assertEqual(s.data_root, "", "空串 = 默认 %USERPROFILE%\\DesktopBox")
+        self.assertEqual(s.data_root, "", "空串 = 默认 %USERPROFILE%\\DeskCountChen")
         self.assertEqual(s.category_exclude, ["快捷方式", "桌面", "z全部"])
         self.assertEqual(s.shortcut_mode, "launcher")
         self.assertTrue(s.strip_extensions)

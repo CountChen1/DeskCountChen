@@ -36,7 +36,7 @@
 ## 零污染
 
 ``app.paths`` 第一步整体重定向到临时沙箱（``tests/sandbox.py``）；真实
-``%USERPROFILE%\\DesktopBox\\.config.json`` 只读一次取 sha256，结束时断言未变。
+``%USERPROFILE%\\DeskCountChen\\.config.json`` 只读一次取 sha256，结束时断言未变。
 """
 
 from __future__ import annotations

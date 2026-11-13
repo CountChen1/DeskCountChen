@@ -3,7 +3,7 @@
 ## 背景（为什么加这条防线）
 
 ``E:\\快捷方式SAO`` 是用户自己的分类数据根，v1.4 测试期的某次运行之后，该目录
-**根下**出现了 6 个 ``启动-*.lnk``（与 ``%USERPROFILE%\\DesktopBox\\.launchers``
+**根下**出现了 6 个 ``启动-*.lnk``（与 ``%USERPROFILE%\\DeskCountChen\\.launchers``
 里那 6 个 sha256 逐字节相同）。那几个文件不是本仓库任何代码路径写出来的
 （全历史 ``git grep`` 没有任何一处把 ``DATA_ROOT`` 当 ``launcher_dir``），
 但**代码里也没有任何一道防线**阻止这种调用错误。

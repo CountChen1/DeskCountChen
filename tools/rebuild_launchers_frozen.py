@@ -3,8 +3,8 @@
 用法（venv 内，QT 走 offscreen，不弹任何窗口）::
 
     .venv/Scripts/python.exe tools/rebuild_launchers_frozen.py \\
-        --exe "E:\\desktopbox\\DesktopBox\\DesktopBox.exe" \\
-        --app-dir "C:\\Users\\Z\\DesktopBox" \\
+        --exe "E:\\desktopbox\\DeskCountChen\\DeskCountChen.exe" \\
+        --app-dir "C:\\Users\\Z\\DeskCountChen" \\
         --publish-dir "E:\\快捷方式SAO"
 
 做什么：

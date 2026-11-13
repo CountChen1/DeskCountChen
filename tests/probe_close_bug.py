@@ -37,7 +37,7 @@
 结束后还原，不改变用户桌面图标状态（单击不启动程序）。
 
 现场保护：``app.paths`` 在 main() 第一步整体重定向到临时沙箱（``tests/sandbox.py``），
-真实 ``%USERPROFILE%\\DesktopBox`` 只读一次取 sha256 指纹，结束时断言零改动。
+真实 ``%USERPROFILE%\\DeskCountChen`` 只读一次取 sha256 指纹，结束时断言零改动。
 
 用法：``.venv\\Scripts\\python.exe tests\\probe_close_bug.py``
 """

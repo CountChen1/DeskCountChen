@@ -9,7 +9,7 @@
 
     {"action": "open", "dir": "<分类目录名>", "x": 123, "y": 456}
 
-服务端名 ``DesktopBox.single.v1``（带版本号，将来协议升级不会和旧实例串话）。
+服务端名 ``DeskCountChen.single.v1``（带版本号，将来协议升级不会和旧实例串话）。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 logger = logging.getLogger(__name__)
 
-SERVER_NAME = "DesktopBox.single.v1"
+SERVER_NAME = "DeskCountChen.single.v1"
 ACTION_OPEN = "open"
 CONNECT_TIMEOUT_MS = 800       # 连接已有实例的超时：失败才降级为提示框
 MAX_REQUEST_BYTES = 64 * 1024  # 协议防御：超长请求直接丢弃

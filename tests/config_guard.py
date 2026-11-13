@@ -50,7 +50,7 @@ def real_config_path() -> Path:
     """
     import os
 
-    return Path(os.environ.get("USERPROFILE", str(Path.home()))) / "DesktopBox" / ".config.json"
+    return Path(os.environ.get("USERPROFILE", str(Path.home()))) / "DeskCountChen" / ".config.json"
 
 
 @contextlib.contextmanager

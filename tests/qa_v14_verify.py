@@ -109,7 +109,7 @@ def provider_pixmap(path) -> QPixmap:
 # 沙箱隔离统一走 ``tests/sandbox.py``（同步 9 个 paths 锚点 + ``paths._BASE_DIRS``，
 # 并在重定向后自校验"所有锚点都在沙箱根之下"）。本脚本不再自己抄一份重定向逻辑：
 # 自己抄的那版漏了 ``_BASE_DIRS``，一旦走到 ``ensure_base_dirs()`` 仍会在真实
-# ``%USERPROFILE%\DesktopBox`` 建目录（"假安全"）。
+# ``%USERPROFILE%\DeskCountChen`` 建目录（"假安全"）。
 
 
 # =========================================================================

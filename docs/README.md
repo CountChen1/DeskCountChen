@@ -1,4 +1,4 @@
-# DesktopBox —— Windows 桌面图标收纳工具
+# DeskCountChen —— Windows 桌面图标收纳工具
 
 把桌面上散乱的快捷方式按"分类"收进文件夹，点一下入口图标就弹出半透明圆角面板，
 面板里点一下就能启动程序。
@@ -55,12 +55,12 @@
 
 ```
 SAO Utils 2 HUD 图标（单击）
-   → %USERPROFILE%\DesktopBox\.launchers\启动-<分类>.lnk
+   → %USERPROFILE%\DeskCountChen\.launchers\启动-<分类>.lnk
    → pythonw.exe main.py --open "<分类目录名>"
    → 第二实例唤醒第一实例 → 弹面板
 ```
 
-- DesktopBox **不再往桌面写 .lnk**（分类增删不再影响桌面整洁）；
+- DeskCountChen **不再往桌面写 .lnk**（分类增删不再影响桌面整洁）；
 - 启动器 .lnk 生成在私有目录 `.launchers`，供 SAO 的 "Change Action" 引用；
 - HUD 图标是 SAO 的浮层，**Win+D 后依旧在**；
 - 详细配置步骤见 **[`docs/SAO-接入.md`](SAO-接入.md)**；
@@ -71,9 +71,9 @@ SAO Utils 2 HUD 图标（单击）
 
 ### 二、数据根可配置（分类数据可以放在别的盘）
 
-- `app.data_root`（空 = `%USERPROFILE%\DesktopBox`），本机设为 `E:\快捷方式SAO`；
+- `app.data_root`（空 = `%USERPROFILE%\DeskCountChen`），本机设为 `E:\快捷方式SAO`；
 - **程序目录不漂移**：`.config.json` / `.icons` / `.ico` / `.logs` / `.launchers`
-  永远在 `%USERPROFILE%\DesktopBox`——数据盘拔掉也能启动、也有日志；
+  永远在 `%USERPROFILE%\DeskCountChen`——数据盘拔掉也能启动、也有日志；
 - `app.category_exclude`（默认 `["快捷方式", "桌面", "z全部"]`）：自动登记分类时
   跳过的目录名（大小写不敏感），避免把数据根里的杂项目录变成分类；
 - 已登记但新数据根里不存在的分类 → 标"隐藏"（不删配置、不动皮肤）。
@@ -117,7 +117,7 @@ v1.2 **彻底放弃悬浮窗体系**（`app/windows/icon_window.py` 已删除，
 
 第二实例被拉起时（互斥量已存在），**不弹"已在运行"对话框**，而是：
 
-1. 通过 `QLocalSocket` 连到第一实例的 `QLocalServer`（服务名 `DesktopBox.single.v1`）；
+1. 通过 `QLocalSocket` 连到第一实例的 `QLocalServer`（服务名 `DeskCountChen.single.v1`）；
 2. 发一条 `{"action":"open","dir":"<分类目录名>","x":123,"y":456}`（UTF-8 + 换行）；
 3. **静默退出**（退出码 0）。
 
@@ -151,7 +151,7 @@ v1.1 是"拖 A 到 B 上 = A、B 互换"，v1.2 曾改成"插入 + 保留空位"
    `.venv\Scripts\python.exe main.py --selfcheck`（打印"基础设施就绪"后退出，
    已有实例在跑时也能用）。
    已经在跑时再双击**不会**新起实例、也**不会**再弹"已在运行"框（见上）。
-3. **首次启动**会自动创建数据目录（`app.data_root`，默认 `%USERPROFILE%\DesktopBox`）
+3. **首次启动**会自动创建数据目录（`app.data_root`，默认 `%USERPROFILE%\DeskCountChen`）
    下的默认分类 `常用\`，并在 `.launchers\` 生成 `启动-常用.lnk`；
    再到 SAO Utils 2 里让 HUD 图标指向它（见 [`docs/SAO-接入.md`](SAO-接入.md)）。
 
@@ -182,10 +182,10 @@ v1.1 是"拖 A 到 B 上 = A、B 互换"，v1.2 曾改成"插入 + 保留空位"
 
 ## 目录结构
 
-程序目录（**永远在 `%USERPROFILE%\DesktopBox`，不随数据根漂移**）：
+程序目录（**永远在 `%USERPROFILE%\DeskCountChen`，不随数据根漂移**）：
 
 ```
-%USERPROFILE%\DesktopBox\
+%USERPROFILE%\DeskCountChen\
 ├── .config.json          全局配置（app.data_root / 每分类外观参数）
 ├── .icons\
 │   ├── <cat_id>.<ext>    自定义分类图标（选入后自动复制一份）
@@ -208,7 +208,7 @@ E://快捷方式SAO//
 ├── 快捷方式\  桌面\  z全部\   ← app.category_exclude 跳过，不登记为分类
 ```
 
-桌面上**不再有任何由 DesktopBox 写出的文件**。
+桌面上**不再有任何由 DeskCountChen 写出的文件**。
 
 ## 人工验收清单（对应 18 条需求）
 
@@ -254,17 +254,17 @@ E://快捷方式SAO//
 
 ## 故障排查
 
-- 日志：`%USERPROFILE%\DesktopBox\.logs\app.log`。
-- pythonw 下如果启动就崩，栈会写到 `%USERPROFILE%\DesktopBox\.logs\crash.log`
+- 日志：`%USERPROFILE%\DeskCountChen\.logs\app.log`。
+- pythonw 下如果启动就崩，栈会写到 `%USERPROFILE%\DeskCountChen\.logs\crash.log`
   （`faulthandler` + `sys.excepthook`），不会静默消失。
-- 环境变量 `DESKTOPBOX_DEBUG=1` 开 DEBUG 级日志。
+- 环境变量 `DESKCOUNTCHEN_DEBUG=1` 开 DEBUG 级日志。
 - 配置损坏时程序自动用默认配置且不覆盖原文件；`.order.json` 损坏时按名排序。
 - 启动器 .lnk 丢失/异常：托盘→该分类→"显示（重建启动器快捷方式）"，或删掉
   `.icons\lnk_state.json` 后重启（会全量重建一遍）；也可点托盘
   「打开启动器目录（供 SAO 引用）」直接看文件在不在。
 - SAO 点了没反应：先确认 `.launchers\启动-<分类>.lnk` 存在（分类被隐藏/改名后
   旧文件名会失效），再看日志里有没有 `--open` 唤醒记录。
-- 数据根盘符不可用时：程序仍会启动（配置与日志在 `%USERPROFILE%\DesktopBox`），
+- 数据根盘符不可用时：程序仍会启动（配置与日志在 `%USERPROFILE%\DeskCountChen`），
   分类会被标"隐藏"，插回磁盘后重启或托盘「显示」即可恢复。
 - 自检：`.venv\Scripts\python.exe tools\selfcheck.py`。
 - 自动化测试：

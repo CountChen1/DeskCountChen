@@ -1,12 +1,13 @@
-"""DesktopBox 进程入口。
+"""Desk CountChen 进程入口（``Desk CountChen`` by CountChen）。
 
-流程：logging → 解析 --open / --selfcheck → 单实例（互斥量 / 唤醒已有实例）
+流程：logging → 解析 --version / --open / --selfcheck → 单实例（互斥量 / 唤醒已有实例）
 → QApplication → 数据根注入 → AppController → QLocalServer → app.exec()。
 
 命令行参数：
 - ``--open <分类目录名>``：由启动器 .lnk（SAO 的 HUD 图标）传入，打开该分类的面板；
 - ``--console``：带控制台窗口**真实运行**（日志同时进 stderr，便于实机排查）；
-- ``--selfcheck``：仅做基础设施自检，打印"基础设施就绪"后退出（不碰互斥量）。
+- ``--selfcheck``：仅做基础设施自检，打印"基础设施就绪"后退出（不碰互斥量）；
+- ``--version``：打印产品名 + 版本 + 构建指纹后退出（零副作用，用于验真伪）。
 
 v1.2 关键变化（桌面图标改为 Windows 真实 .lnk 快捷方式）：
 - 快捷方式的目标就是 ``pythonw.exe main.py --open <分类目录名>``，
@@ -32,17 +33,18 @@ from logging.handlers import RotatingFileHandler
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app import paths, single_instance
+from app import brand, paths, single_instance
 from app.config import DRAG_THRESHOLD_PX, AppConfig
 from app.win32 import window_ops
 
 LOG_MAX_BYTES = 512 * 1024
 LOG_BACKUP_COUNT = 2
-APP_VERSION = "1.4.0"
+# 版本号唯一来源 = app/__init__.py::__version__（经 brand 投影），不再另写字面量
+APP_VERSION = brand.VERSION
 
 
 def _init_logging(console: bool) -> None:
-    level = logging.DEBUG if os.environ.get("DESKTOPBOX_DEBUG") == "1" else logging.INFO
+    level = logging.DEBUG if os.environ.get("DESKCOUNTCHEN_DEBUG") == "1" else logging.INFO
     fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
     handlers: list[logging.Handler] = [
         RotatingFileHandler(
@@ -117,6 +119,12 @@ def _apply_data_root() -> None:
 
 
 def main(argv: list[str]) -> int:
+    # ``--version`` 必须在任何副作用之前：不建目录、不写日志、不碰互斥量，
+    # 这样它在只读环境 / 数据盘未挂载时也能正常回答"你是谁"。
+    if "--version" in argv:
+        print(brand.version_line())
+        return 0
+
     console = "--console" in argv
     # v1.2：``--console`` 改为"带控制台窗口真实运行"（QA 需要边跑边看日志），
     # 基础设施自检独立成 ``--selfcheck``（打印后立即退出，且在拿互斥量之前，
@@ -131,10 +139,10 @@ def main(argv: list[str]) -> int:
         print("基础设施就绪")
         return 0
 
-    window_ops.set_app_user_model_id("WorkBuddy.DesktopBox")
+    window_ops.set_app_user_model_id(brand.APP_USER_MODEL_ID)
 
     app = QApplication(argv)
-    app.setApplicationName("DesktopBox")
+    app.setApplicationName(brand.PRODUCT_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)  # 托盘常驻；窗口只隐藏不关闭
     # 面板条目拖拽阈值固定 4px：全局设置让 QListView 原生拖拽与需求一致
@@ -142,7 +150,8 @@ def main(argv: list[str]) -> int:
 
     # 数据根必须在构造 controller 之前注入（controller 构造里就会用 DATA_ROOT）
     _apply_data_root()
-    logger.info("数据根 = %s；程序目录 = %s", paths.DATA_ROOT, paths.APP_DIR)
+    logger.info("%s 启动：版本 %s；数据根 = %s；程序目录 = %s",
+                brand.PRODUCT_NAME, APP_VERSION, paths.DATA_ROOT, paths.APP_DIR)
 
     open_dir = parse_open_argument(argv)
     # 第二实例的鼠标位置就是用户双击桌面图标的落点；必须在任何阻塞前取
@@ -150,18 +159,21 @@ def main(argv: list[str]) -> int:
 
     if not window_ops.acquire_single_instance_mutex():
         if open_dir is None:
-            logger.info("已有 DesktopBox 实例在运行，本次不再启动")
+            logger.info("已有 %s 实例在运行，本次不再启动", brand.PRODUCT_NAME)
             return 0
-        logger.info("已有 DesktopBox 实例在运行，尝试唤醒（dir=%s）", open_dir)
+        logger.info("已有 %s 实例在运行，尝试唤醒（dir=%s）", brand.PRODUCT_NAME, open_dir)
         if single_instance.send_open_request(open_dir, cursor.x(), cursor.y()):
             return 0  # 静默退出：面板由已运行实例弹出
         # 唤醒失败（旧版本实例 / 端点不可用）→ 才降级为提示框
-        QMessageBox.warning(None, "DesktopBox", "DesktopBox 已在运行，但无法唤醒已有实例。")
+        QMessageBox.warning(
+            None, brand.PRODUCT_NAME,
+            f"{brand.PRODUCT_NAME} 已在运行，但无法唤醒已有实例。",
+        )
         return 0
 
     if console:
         # 带控制台运行：日志同时输出到 stderr，便于在真实桌面上排查
-        logger.info("DesktopBox %s 以控制台模式启动", APP_VERSION)
+        logger.info("%s %s 以控制台模式启动", brand.PRODUCT_NAME, APP_VERSION)
 
     from app.controller import AppController
 

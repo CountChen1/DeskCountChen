@@ -1,2 +1,2 @@
-# DesktopBox 唯一运行时依赖（其余全部使用标准库）
+# DeskCountChen 唯一运行时依赖（其余全部使用标准库）
 PySide6-Essentials==6.12.0

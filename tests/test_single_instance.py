@@ -43,7 +43,7 @@ def pump_until(app, predicate, timeout: float = 3.0) -> bool:
 
 
 def unique_server_name() -> str:
-    return f"DesktopBox.test.{uuid.uuid4().hex[:8]}"
+    return f"DeskCountChen.test.{uuid.uuid4().hex[:8]}"
 
 
 class ProtocolTests(unittest.TestCase):

@@ -9,7 +9,7 @@
 6. 反复"把第一个图标拖到最后一个图标上"（用户高频操作）：行数恒定、
    永不产生空位、布局收敛（不会越拖越散）。
 
-安全：全程只在临时目录里操作（不碰 %USERPROFILE%\\DesktopBox，不碰真实桌面）。
+安全：全程只在临时目录里操作（不碰 %USERPROFILE%\\DeskCountChen，不碰真实桌面）。
 
 用法：.venv\\Scripts\\python.exe tests\\qa_slot_persist.py
 """

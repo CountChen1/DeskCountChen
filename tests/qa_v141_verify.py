@@ -1,4 +1,4 @@
-"""DesktopBox v1.4.1 独立验收脚本（QA 侧黑盒）。
+"""DeskCountChen v1.4.1 独立验收脚本（QA 侧黑盒）。
 
 覆盖两批改动：
 

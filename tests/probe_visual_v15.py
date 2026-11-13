@@ -8,7 +8,7 @@
 2. 淡入动画从 ``show()`` 到 ``fade == 1.0`` 的实际耗时（应 ≈140ms）；
 3. 悬停前后的渲染像素差异（并落盘 PNG 供肉眼复核）。
 
-现场保护：``app.paths`` 全程指向临时沙箱，真实 ``%USERPROFILE%\\DesktopBox``
+现场保护：``app.paths`` 全程指向临时沙箱，真实 ``%USERPROFILE%\\DeskCountChen``
 只读一次取 sha256 指纹，结束断言零改动。
 
 用法：``.venv\\Scripts\\python.exe tests\\probe_visual_v15.py``

@@ -1,4 +1,4 @@
-%% DesktopBox 关键流程时序图 —— v1.2（与 docs/design.md §10 一致）
+%% DeskCountChen 关键流程时序图 —— v1.2（与 docs/design.md §10 一致）
 %% v1.0 的悬浮窗 / 看门狗流程已整体删除。
 
 %% ============ 10.5.1 启动流程 ============
@@ -54,7 +54,7 @@ sequenceDiagram
         end
         DS->>DS: _prune_orphan_icons(alive, removed_ids, managed_before)
         Note over DS: 三道闸：alive 空 → 不动手；removed_ids 空 → 早退；<br/>注销占比 ≥ max(2, ceil(managed_before/2)) → 熔断（只保护 .ico，.lnk 照删）
-        AC->>SI: SingleInstanceServer().start()  # DesktopBox.single.v1
+        AC->>SI: SingleInstanceServer().start()  # DeskCountChen.single.v1
         SI-->>AC: open_requested 信号已连接 open_panel_for_dir
         AC-->>M: start() 返回
         M->>M: if open_dir: open_panel_for_dir(...)  # .lnk 拉起的首实例
@@ -74,7 +74,7 @@ sequenceDiagram
     U->>SH: 双击 <桌面>\常用.lnk
     SH->>P2: pythonw.exe main.py --open "常用"
     P2->>P2: 互斥量已被持有 → cursor = QCursor.pos()
-    P2->>P1: QLocalSocket 连接 DesktopBox.single.v1
+    P2->>P1: QLocalSocket 连接 DeskCountChen.single.v1
     P2->>P1: {"action":"open","dir":"常用","x":..,"y":..}\n
     Note over P2,P1: 写完必须先 flush + 跑局部事件循环<br/>（立刻析构套接字会丢包）
     P1->>P1: _on_ready_read → decode_request

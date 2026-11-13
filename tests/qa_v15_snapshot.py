@@ -11,12 +11,12 @@
 
 | 键 | 含义 |
 |---|---|
-| ``config`` | ``%USERPROFILE%\\DesktopBox\\.config.json`` 的 sha256 / size |
+| ``config`` | ``%USERPROFILE%\\DeskCountChen\\.config.json`` 的 sha256 / size |
 | ``sao`` | ``E:\\快捷方式SAO`` 的文件数 / 总字节 / 清单摘要 |
 | ``desktop`` | 真实桌面条目集合（16 项、其中 12 个 .lnk） |
 | ``launchers`` | ``.launchers`` 下 6 个 .lnk 的 mtime（零重建证据） |
 | ``icons`` | ``.icons/ico`` 下 6 个 .ico 的 mtime（零重建证据） |
-| ``processes`` | 残留的 DesktopBox 进程（``python*w.exe main.py``） |
+| ``processes`` | 残留的 DeskCountChen 进程（``python*w.exe main.py``） |
 | ``crash`` | ``crash.log`` 是否存在 |
 
 清单摘要（``listing_digest``）不 hash 文件内容（4GB 太重），而是对
@@ -42,7 +42,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 USERPROFILE = Path(os.environ.get("USERPROFILE", str(Path.home())))
-APP_DIR = USERPROFILE / "DesktopBox"
+APP_DIR = USERPROFILE / "DeskCountChen"
 CONFIG_PATH = APP_DIR / ".config.json"
 SAO_ROOT = Path(r"E:\快捷方式SAO")
 DESKTOP = USERPROFILE / "Desktop"
@@ -120,7 +120,7 @@ def _desktop_entries() -> dict:
 
 
 def _stray_processes() -> list[str]:
-    """列出残留的 DesktopBox 主进程（命令行里带 main.py 的 python*）。"""
+    """列出残留的 DeskCountChen 主进程（命令行里带 main.py 的 python*）。"""
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
@@ -255,7 +255,7 @@ def compare(before: dict, after: dict) -> list[tuple[str, bool, str]]:
         b == a,
         "全部一致" if b == a else f"变化: {[k for k in set(b) | set(a) if b.get(k) != a.get(k)]}")
 
-    add("无残留 DesktopBox 进程", not after["processes"],
+    add("无残留 DeskCountChen 进程", not after["processes"],
         "无" if not after["processes"] else "; ".join(after["processes"]))
     crash = after["crash_log"]
     add("无硬崩溃记录（.logs\\crash.log 为空）",

@@ -18,6 +18,8 @@ from typing import Callable, Iterable
 
 from PySide6.QtWidgets import QMenu
 
+from app import brand
+
 # 分类级动作键（托盘里每个分类的子菜单）
 CAT_ACTION_OPEN_PANEL = "open_panel"
 CAT_ACTION_OPEN_FOLDER = "open_folder"
@@ -30,6 +32,7 @@ CAT_ACTION_SHOW = "show"      # 显示 = 重新创建快捷方式
 TRAY_ACTION_NEW_CATEGORY = "new_category"
 TRAY_ACTION_OPEN_DATA_DIR = "open_data_dir"
 TRAY_ACTION_OPEN_LAUNCHERS = "open_launchers"
+TRAY_ACTION_ABOUT = "about"
 TRAY_ACTION_EXIT = "exit"
 
 __all__ = [
@@ -42,6 +45,7 @@ __all__ = [
     "TRAY_ACTION_NEW_CATEGORY",
     "TRAY_ACTION_OPEN_DATA_DIR",
     "TRAY_ACTION_OPEN_LAUNCHERS",
+    "TRAY_ACTION_ABOUT",
     "TRAY_ACTION_EXIT",
     "build_category_menu",
     "build_tray_menu",
@@ -90,5 +94,7 @@ def build_tray_menu(parent, dispatch: Dispatch,
     menu.addAction("打开启动器目录（供 SAO 引用）",
                    lambda: dispatch(TRAY_ACTION_OPEN_LAUNCHERS, None))
     menu.addSeparator()
+    menu.addAction(f"关于 {brand.PRODUCT_NAME}",
+                   lambda: dispatch(TRAY_ACTION_ABOUT, None))
     menu.addAction("退出", lambda: dispatch(TRAY_ACTION_EXIT, None))
     return menu

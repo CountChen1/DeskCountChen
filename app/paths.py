@@ -4,7 +4,7 @@
 
 v1.4 概念拆分（桌面入口改由 SAO Utils 2 的 HUD 图标承担）：
 
-- ``APP_DIR`` = ``%USERPROFILE%\\DesktopBox``：程序自己的东西（.config.json /
+- ``APP_DIR`` = ``%USERPROFILE%\\DeskCountChen``：程序自己的东西（.config.json /
   .icons / .ico / .logs / .launchers），**永远不随数据根漂移**。理由：数据根
   换到 E 盘（甚至外接盘临时未挂载）时，配置与日志不能一起消失——那会让程序
   连"自己上次用哪个数据根"都读不到，直接变成另一套默认配置。
@@ -14,11 +14,11 @@ v1.4 概念拆分（桌面入口改由 SAO Utils 2 的 HUD 图标承担）：
 
 v1.6 部署态（PyInstaller frozen）：
 
-- 源码运行态行为**完全不变**（``%USERPROFILE%\\DesktopBox``）；
+- 源码运行态行为**完全不变**（``%USERPROFILE%\\DeskCountChen``）；
 - frozen（onedir 打包）态：``APP_DIR = <部署根>\\data``。部署根 = exe 所在目录
-  的上一级（``E:\\desktopbox\\DesktopBox\\DesktopBox.exe`` → ``E:\\desktopbox\\data``），
+  的上一级（``E:\\desktopbox\\DeskCountChen\\DeskCountChen.exe`` → ``E:\\desktopbox\\data``），
   即"程序与数据放一起、整个 E:\\desktopbox 目录拷走即分享"；
-- 环境变量 ``DESKTOPBOX_HOME``（仅在 frozen 态生效）指向完整的程序私有目录，
+- 环境变量 ``DESKCOUNTCHEN_HOME``（仅在 frozen 态生效）指向完整的程序私有目录，
   设置后**优先于**上述默认值——这是换盘 / 多实例场景的逃生门。
 
 本模块**不读配置**（避免 config ↔ paths 循环依赖），只负责记住并确保目录存在。
@@ -51,19 +51,19 @@ def resolve_app_dir(
     Args:
         frozen: 是否处于 PyInstaller 打包态（``sys.frozen``）。
         exe_path: 入口可执行文件路径。源码态 = 解释器路径（仅用于保持签名
-            一致，不参与源码态解析）；frozen 态 = DesktopBox.exe 路径。
-        desktopbox_home: 环境变量 ``DESKTOPBOX_HOME``（None/空白 = 未设置）。
+            一致，不参与源码态解析）；frozen 态 = DeskCountChen.exe 路径。
+        desktopbox_home: 环境变量 ``DESKCOUNTCHEN_HOME``（None/空白 = 未设置）。
         userprofile: 环境变量 ``USERPROFILE``（None = 回落 ``Path.home()``）。
 
     Returns:
         APP_DIR 绝对路径。
 
     frozen 态布局说明：PyInstaller onedir 产物是
-    ``<部署根>\\<应用目录>\\DesktopBox.exe``（``_internal\\`` 与 exe 同级），
+    ``<部署根>\\<应用目录>\\DeskCountChen.exe``（``_internal\\`` 与 exe 同级），
     因此 APP_DIR = ``exe.parent.parent / "data"``。**刻意不向上无限爬**：
     若 exe 被放进更深层目录（例如误拷进 ``.venv\\Scripts\\``），parent.parent
     只是"就近猜一个 data 根"，宁可猜错也不把数据写进盘根或系统目录；
-    真正需要自定义位置的场景请用 ``DESKTOPBOX_HOME``。
+    真正需要自定义位置的场景请用 ``DESKCOUNTCHEN_HOME``。
     """
     if frozen:
         env = str(desktopbox_home or "").strip()
@@ -72,7 +72,7 @@ def resolve_app_dir(
         exe = Path(exe_path).resolve()
         return exe.parent.parent / "data"
     base = Path(userprofile) if userprofile else Path.home()
-    return base / "DesktopBox"
+    return base / "DeskCountChen"
 
 
 def _default_app_dir() -> Path:
@@ -81,7 +81,7 @@ def _default_app_dir() -> Path:
         return resolve_app_dir(
             frozen=True,
             exe_path=str(sys.executable),
-            desktopbox_home=os.environ.get("DESKTOPBOX_HOME"),
+            desktopbox_home=os.environ.get("DESKCOUNTCHEN_HOME"),
         )
     return resolve_app_dir(
         frozen=False,
@@ -90,7 +90,7 @@ def _default_app_dir() -> Path:
     )
 
 
-# 程序私有目录：源码态 = %USERPROFILE%\DesktopBox；frozen 态 = <部署根>\data
+# 程序私有目录：源码态 = %USERPROFILE%\DeskCountChen；frozen 态 = <部署根>\data
 # （**永不随数据根漂移**）
 APP_DIR: Path = _default_app_dir()
 

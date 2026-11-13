@@ -1,4 +1,4 @@
-# DesktopBox 系统设计文档
+# DeskCountChen 系统设计文档
 
 > 版本：v1.0（原设计）+ **v1.2 架构变更见 §10** ｜ 作者：架构师 高见远 ｜ 技术栈：Python 3.13 + PySide6 6.12.0（Qt Widgets）+ ctypes
 > 目标：Windows 10/11 桌面图标收纳工具。
@@ -212,7 +212,7 @@ class IconCache:
 
 ### 决策 6：排序数据模型（`.order.json`）
 
-**文件位置**：`%USERPROFILE%\DesktopBox\<分类名>\.order.json`，创建后立即 `SetFileAttributesW(path, FILE_ATTRIBUTE_HIDDEN)` 设为隐藏（Windows 不以 `.` 前缀隐藏文件，必须设属性）。
+**文件位置**：`%USERPROFILE%\DeskCountChen\<分类名>\.order.json`，创建后立即 `SetFileAttributesW(path, FILE_ATTRIBUTE_HIDDEN)` 设为隐藏（Windows 不以 `.` 前缀隐藏文件，必须设属性）。
 
 **Schema（v1）**
 
@@ -314,7 +314,7 @@ mousePress(item_i) → 记录 index；启动 400ms 单次定时器；进入 Mayb
 | 2 | `run.bat` | 用 `.venv\Scripts\pythonw.exe` 无控制台窗启动 `main.py`（附 `--console` 调试分支） |
 | 3 | `main.py` | 进程入口：设置 AppUserModelID、初始化 logging、单实例互斥、创建 `QApplication` 与 `AppController`、`app.exec()` |
 | 4 | `app/__init__.py` | 包标识，导出 `__version__` |
-| 5 | `app/paths.py` | 解析 `%USERPROFILE%\DesktopBox` 根、分类目录、图片目录、日志目录、配置文件路径，负责首次创建 |
+| 5 | `app/paths.py` | 解析 `%USERPROFILE%\DeskCountChen` 根、分类目录、图片目录、日志目录、配置文件路径，负责首次创建 |
 | 6 | `app/config.py` | `Settings`/`CategoryConfig`/`AppConfig` 数据类（dict 互转、默认值、校验与 clamp）、原子读写、版本迁移 |
 | 7 | `app/icon_provider.py` | `IconCache`：`QFileIconProvider` 封装、按 `(path,mtime,px)` 缓存、内置默认分类图标（QPainter 绘制） |
 | 8 | `app/order_store.py` | `.order.json` 的加载/容错/原子保存/设隐藏属性，含 `stale` 保留逻辑 |
@@ -342,7 +342,7 @@ mousePress(item_i) → 记录 index；启动 400ms 单次定时器；进入 Mayb
 
 ## 4. 关键数据结构
 
-### 4.1 配置 `%USERPROFILE%\DesktopBox\.config.json`
+### 4.1 配置 `%USERPROFILE%\DeskCountChen\.config.json`
 
 > **重要（已定稿，勿按旧版写）**：**面板皮肤全部按分类独立**——面板宽高、圆角、背景色、透明度、弹出位置模式、图标尺寸、图标图片、显示文字，**一律存在该分类的配置对象里**（用户要求"每个分类各自一套皮肤，都能分开独立编辑"）。`app` 段只保留**全局行为参数**（时序常量、默认值、面板内条目尺寸），不再有任何外观字段。
 
@@ -378,7 +378,7 @@ mousePress(item_i) → 记录 index；启动 400ms 单次定时器；进入 Mayb
       "id": "cat_5b91e40a",
       "dir": "娱乐",
       "label": "娱乐",
-      "image": "C:\\Users\\Z\\DesktopBox\\.icons\\cat_5b91e40a.png",
+      "image": "C:\\Users\\Z\\DeskCountChen\\.icons\\cat_5b91e40a.png",
       "icon_px": 80,
       "x": 120,
       "y": 420,
@@ -404,7 +404,7 @@ mousePress(item_i) → 记录 index；启动 400ms 单次定时器；进入 Mayb
 | `app.edit_press_ms` | int | 默认 400 | 长按进编辑态阈值（全局行为） |
 | `app.watchdog_ms` / `app.watch_poll_ms` | int | 500 / 1000 | Win+D 看门狗、目录轮询间隔（全局行为） |
 | `cat.id` | str | `cat_` + 8 hex | 稳定主键，**不随 label 变化**（图标文件名用它） |
-| `cat.dir` | str | 目录名，创建后不可改 | 对应 `DesktopBox\<dir>\`，**目录名与显示文字解耦**，改名只改 label 不动文件系统 |
+| `cat.dir` | str | 目录名，创建后不可改 | 对应 `DeskCountChen\<dir>\`，**目录名与显示文字解耦**，改名只改 label 不动文件系统 |
 | `cat.label` | str | ≤ 20 字符 | 需求 1 的可编辑文字（**每分类**） |
 | `cat.image` | str | 绝对路径或 `""` | 空 = 用内置默认图标；自定义图片在设置里选入后**复制一份**到 `.icons\<id>.<ext>`（**每分类**） |
 | `cat.icon_px` | int | 48–128，默认取 `app.icon_px_default` | 需求 2，**每分类独立** |
@@ -662,7 +662,7 @@ sequenceDiagram
     M->>WO: acquire_single_instance_mutex()
     alt 已有实例
         WO-->>M: False
-        M->>M: 提示"DesktopBox 已在运行"并退出(0)
+        M->>M: 提示"DeskCountChen 已在运行"并退出(0)
     else 首个实例
         WO-->>M: True
         M->>AC: AppController()
@@ -672,7 +672,7 @@ sequenceDiagram
         else 正常
             CFG-->>AC: AppConfig
         end
-        AC->>AC: _ensure_categories()  # 扫描 DesktopBox 下未登记的目录→自动建分类；若一个都没有则创建"常用"
+        AC->>AC: _ensure_categories()  # 扫描 DeskCountChen 下未登记的目录→自动建分类；若一个都没有则创建"常用"
         AC->>IC: IconCache()
         loop 每个 visible 分类
             AC->>IW: CategoryIconWindow(cat, icons, cfg)
@@ -837,7 +837,7 @@ QTimer(1000ms) 轮询签名比对               ─┴→ FolderModel._on_fs_cha
    - 配置文件损坏 → 使用内存默认配置、**不覆盖**用户文件，日志记录，下次保存时原子覆盖。
    - `.order.json` 损坏 → 视为无记录（按名称排序），**不删除**。
    - 永不向用户弹 `QMessageBox` 报错（除启动时"已在运行"与 fatal 初始化失败）；一切异常写日志。
-   - 日志：`%USERPROFILE%\DesktopBox\.logs\app.log`，`RotatingFileHandler(maxBytes=512KB, backupCount=2)`，级别 INFO，`DEBUG` 由 `DESKTOPBOX_DEBUG=1` 开启。
+   - 日志：`%USERPROFILE%\DeskCountChen\.logs\app.log`，`RotatingFileHandler(maxBytes=512KB, backupCount=2)`，级别 INFO，`DEBUG` 由 `DESKCOUNTCHEN_DEBUG=1` 开启。
 6. **原子写**：所有 JSON 写入 = 同目录 `<name>.tmp.<pid>` → `flush+fsync` → `os.replace()`。`json.dump(..., ensure_ascii=False, indent=2)`。
 7. **时间**：配置文件内时间戳一律 ISO 8601 UTC（`datetime.now(timezone.utc).isoformat(timespec="seconds")`）。
 8. **Qt 导入陷阱（务必照抄）**：
@@ -894,7 +894,7 @@ QTimer(1000ms) 轮询签名比对               ─┴→ FolderModel._on_fs_cha
 **交付标准**：
 1. 启动后按配置出现 N 个分类图标，位置正确、不进任务栏、不在 Alt+Tab、点击不抢焦点。
 2. 单击开/收面板；切换分类时旧面板关闭、新面板打开；点面板外关闭。
-3. 右键菜单五项（打开面板/打开此文件夹/设置/隐藏此图标/重命名）与托盘菜单（新建分类/打开数据目录/退出）全部可用；**右键"设置"打开的是该分类的皮肤设置**，托盘"新建分类"能在 `DesktopBox\` 下建目录并当场出现新图标（默认皮肤 + 错开位置）。
+3. 右键菜单五项（打开面板/打开此文件夹/设置/隐藏此图标/重命名）与托盘菜单（新建分类/打开数据目录/退出）全部可用；**右键"设置"打开的是该分类的皮肤设置**，托盘"新建分类"能在 `DeskCountChen\` 下建目录并当场出现新图标（默认皮肤 + 错开位置）。
 4. 拖动图标后重启程序，位置保持；面板拉伸后重启，尺寸保持。
 5. **皮肤按分类独立生效**：改 A 分类的圆角/背景色/透明度/位置模式/图标尺寸后，A 立即变化并落盘，**B 分类完全不受影响**；重启后各自保持。
 6. Win+D 后图标 0.5–1s 内自动回来；"隐藏此图标"后**不会**被看门狗复活。
@@ -904,7 +904,7 @@ QTimer(1000ms) 轮询签名比对               ─┴→ FolderModel._on_fs_cha
 **源文件**：`tools/selfcheck.py`、`docs/README.md`、`run.bat`(完善)、以及跨模块 bugfix（允许修改任意前述文件）
 **交付标准**：
 1. `tools/selfcheck.py` 可在无 GUI 下手动跑通：目录结构创建、order 合并四用例、自然排序、图标取图、路径 clamp。
-2. `docs/README.md` 写清：首次使用、如何建分类、如何放快捷方式、`DesktopBox` 目录结构、18 条需求对应的人工验收步骤。
+2. `docs/README.md` 写清：首次使用、如何建分类、如何放快捷方式、`DeskCountChen` 目录结构、18 条需求对应的人工验收步骤。
 3. 逐条验证 §2 决策中标注"实测/待验证"的实机行为：Alt+Tab 不出现、任务栏无图标、点击图标不抢焦点、Win+D 后 0.5–1s 复活、`opacity=0` 只剩内容、失效 `.lnk` 弹原生错误框、圆角无黑角、多屏 clamp 正确。
 4. `run.bat` 双击可无控制台启动；重复双击不产生第二个实例。
 
@@ -946,13 +946,13 @@ graph LR
 
 ### 9.4 分类与目录的绑定关系
 - `dir`（目录名）创建后不可改；`label`（显示文字）可变。因此"改名"是纯显示层操作。
-- 启动时会把 `DesktopBox\` 下**已存在但未登记**的子目录自动登记为分类（图标位置默认从 `(80, 120)` 起错开排布），保证用户手工建目录后能看到；不会自动删除已登记但目录被删的分类（图标保留，面板显示为空）。
-- **托盘"新建分类"流程**：弹 `QInputDialog` 输入名称 → 校验为合法 Windows 目录名且不与现有 `dir` 冲突（冲突则追加 `-2`、`-3`）→ `mkdir DesktopBox\<name>` → 追加 `CategoryConfig`（`label = name`，皮肤取默认常量：`icon_px = app.icon_px_default`、`radius = 12`、`bg_color = "#F5F6F8"`、`opacity = 88`、`position_mode = "anchor"`、`panel_w/h = 420/300`）→ 位置取当前图标最小占用区的下一个错开槽位 → 立即创建并显示图标。
+- 启动时会把 `DeskCountChen\` 下**已存在但未登记**的子目录自动登记为分类（图标位置默认从 `(80, 120)` 起错开排布），保证用户手工建目录后能看到；不会自动删除已登记但目录被删的分类（图标保留，面板显示为空）。
+- **托盘"新建分类"流程**：弹 `QInputDialog` 输入名称 → 校验为合法 Windows 目录名且不与现有 `dir` 冲突（冲突则追加 `-2`、`-3`）→ `mkdir DeskCountChen\<name>` → 追加 `CategoryConfig`（`label = name`，皮肤取默认常量：`icon_px = app.icon_px_default`、`radius = 12`、`bg_color = "#F5F6F8"`、`opacity = 88`、`position_mode = "anchor"`、`panel_w/h = 420/300`）→ 位置取当前图标最小占用区的下一个错开槽位 → 立即创建并显示图标。
 
 ### 9.5 其他假设
 1. 面板只显示 `.lnk`、`.exe`、子目录三类；`.url`、`.bat`、普通文件一律不显示（严格按需求 6）；带 Windows 隐藏属性的文件/目录同样不显示。
-2. 首次启动若 `DesktopBox\` 下没有任何子目录，自动创建并登记一个名为"常用"的分类，避免"启动后什么都看不到"。
-3. 自定义图标图片选入后**复制**到 `DesktopBox\.icons\<cat_id>.<ext>`，不引用原路径（原图被删也不丢图标）。不引入 Pillow：`QIcon(path).pixmap()` 即可读 png/ico。
+2. 首次启动若 `DeskCountChen\` 下没有任何子目录，自动创建并登记一个名为"常用"的分类，避免"启动后什么都看不到"。
+3. 自定义图标图片选入后**复制**到 `DeskCountChen\.icons\<cat_id>.<ext>`，不引用原路径（原图被删也不丢图标）。不引入 Pillow：`QIcon(path).pixmap()` 即可读 png/ico。
 4. 多显示器：面板按"图标中心点所在屏幕"定位并 clamp 到该屏可用区；不做图标跨屏自动迁移。显示器减少导致图标落在屏外时，由 `clamp_to_screens` 拉回主屏。
 5. 面板圆角外的 4 个"空白角"仍属于面板窗口矩形，点击不穿透（v1 接受；如需完美可用 `setMask` 逐帧 mask，但会有锯齿，不建议）。
 6. 单实例用 `CreateMutexW` + `GetLastError()==ERROR_ALREADY_EXISTS` 判定；不做"唤起已有实例"的 IPC（v1 只需提示并退出）。
@@ -1034,7 +1034,7 @@ p->SetPath(pythonw.exe)                    # vtable 20
 p->SetArguments('"<root>\main.py" --open "<分类目录名>"')   # vtable 11
 p->SetWorkingDirectory(<root>)             # vtable 9
 p->SetIconLocation(<ico 绝对路径>, 0)       # vtable 17
-p->SetDescription("DesktopBox 分类：<label>")  # vtable 7
+p->SetDescription("DeskCountChen 分类：<label>")  # vtable 7
 p->QueryInterface(IID_IPersistFile, &pf)
 pf->Save(<lnk 绝对路径>, TRUE)              # IPersistFile vtable 6
 pf->Release(); p->Release(); CoUninitialize()
@@ -1080,7 +1080,7 @@ pf->Release(); p->Release(); CoUninitialize()
    > 但体积差 32 倍、小尺寸清晰度差一档 —— 必须实测比对才能选对。
 3. **无皮肤图**时用 `IconCache.default_icon()`（QPainter 画的内置收纳箱）当源图，
    保证每个分类都有图标。
-4. **缓存与失效**：存 `DesktopBox\.icons\ico\<cat_id>.ico`。
+4. **缓存与失效**：存 `DeskCountChen\.icons\ico\<cat_id>.ico`。
    指纹 = 皮肤图路径 + 该文件的 `st_mtime_ns` + `st_size`；与
    `.icons\lnk_state.json` 里记录的不一致才重建，重建后**连带重建 `.lnk`**
    （否则资源管理器看不到新图标）。
@@ -1134,7 +1134,7 @@ else:
 ### 10.6 单实例唤醒协议（`QLocalServer` / `QLocalSocket`）
 
 ```
-服务名：DesktopBox.single.v1           （带版本号，将来协议升级不与旧实例串话）
+服务名：DeskCountChen.single.v1           （带版本号，将来协议升级不与旧实例串话）
 报文：{"action":"open","dir":"<分类目录名>","x":123,"y":456}\n   （UTF-8 JSON + 换行）
 超时：连接 800ms；对端无回执也最多等 800ms
 上限：64KB（超长直接丢弃）
@@ -1297,7 +1297,7 @@ anchor = max{ i | work[i] is not None 且 i ∉ picked }
 #### 缺陷 1（P2，产品决策）：前导空位无界累积
 
 **现象**：插入语义每把图标从首槽拖走一次就净增 1 个空位。用户真实数据
-`DesktopBox\常用\.order.json` 已是 25 槽、**17 个前导空位、仅 4 个图标**，
+`DeskCountChen\常用\.order.json` 已是 25 槽、**17 个前导空位、仅 4 个图标**，
 面板上半部约 55% 全空。
 
 **决策**（按此执行，不再讨论）：
@@ -1731,7 +1731,7 @@ QScreen.grabWindow(0, 面板区域)      # 只抓面板那一小块（整屏 25�
 ### 12.7 启动器目录安全防线（v1.5 复审修复）
 
 **现象**：用户数据根 `E:\快捷方式SAO` **根下**出现 6 个 `启动-*.lnk`，与
-`%USERPROFILE%\DesktopBox\.launchers\` 里那 6 个 sha256 逐字节相同、mtime 同为
+`%USERPROFILE%\DeskCountChen\.launchers\` 里那 6 个 sha256 逐字节相同、mtime 同为
 19:19:57。
 
 **根因调查结论（查不到确证，只能确认不是本仓库代码路径写的）**：
@@ -1740,7 +1740,7 @@ QScreen.grabWindow(0, 面板区域)      # 只抓面板那一小块（整屏 25�
   的 `LAUNCHERS_DIR` 自 v1.4 起一直是 `APP_DIR / ".launchers"`（`git log -S` 只有一个提交）；
 - `set_data_root()` 只改 `DATA_ROOT`，**从不触碰** `LAUNCHERS_DIR`（现有单测断言）；
 - 关键证据：`19:19:57` 的 `app.log` 显示 6 个 .lnk 是写到
-  `C:\Users\Z\DesktopBox\.launchers\` 的（459–464 行），**不是** E 盘；
+  `C:\Users\Z\DeskCountChen\.launchers\` 的（459–464 行），**不是** E 盘；
 - E 盘那 6 个既**同内容**又**同 mtime**，是 `shutil.copy2` / `cp -p` 这类
   **保留 mtime 的复制**特征；若是程序用 `IShellLinkW` 重新写一遍，mtime 会是写入
   那一刻。故最可能是迁移期间的一次**手工/一次性复制**。

@@ -1,6 +1,6 @@
 """v1.4 SAO 接入状态自检（只读，绝不写任何文件）。
 
-检查目标：确认「SAO 图标做入口 + DesktopBox 面板做内容」这套链路的关键不变量
+检查目标：确认「SAO 图标做入口 + DeskCountChen 面板做内容」这套链路的关键不变量
 全部成立。用户任何时候都能跑它确认状态，不需要懂代码。
 
 用法：
@@ -23,11 +23,11 @@
 注意第 6 条只校验**合法区间**，不比对具体数值。面板宽度、圆角、颜色、居中/贴合
 都是用户随时会调的东西，工具锁死它们就会"用户一改就红"——那是工具的 bug。
 
-v1.6 部署态适配：APP_DIR 不再写死 ``%USERPROFILE%\\DesktopBox``。解析优先级
+v1.6 部署态适配：APP_DIR 不再写死 ``%USERPROFILE%\\DeskCountChen``。解析优先级
 （与产品语义对齐，见 app/paths.py 的 frozen 分支）：
-``--app-dir`` 显式指定 > 环境变量 ``DESKTOPBOX_HOME`` > 部署默认
+``--app-dir`` 显式指定 > 环境变量 ``DESKCOUNTCHEN_HOME`` > 部署默认
 ``E:\\desktopbox\\data``（存在 .config.json 才认）> 源码态旧目录
-``%USERPROFILE%\\DesktopBox``。
+``%USERPROFILE%\\DeskCountChen``。
 """
 
 from __future__ import annotations
@@ -66,18 +66,18 @@ EXPECTED_EXCLUDE = ["快捷方式", "桌面", "z全部"]
 def resolve_app_dir(explicit: str | None = None) -> Path:
     """本工具视角的 APP_DIR（v1.6 起不再写死 C 盘）。
 
-    优先级：``--app-dir`` 显式指定 > 环境变量 ``DESKTOPBOX_HOME`` > 部署默认
+    优先级：``--app-dir`` 显式指定 > 环境变量 ``DESKCOUNTCHEN_HOME`` > 部署默认
     ``E:\\desktopbox\\data``（必须存在 .config.json 才认，避免在未迁移的机器上
-    误选空目录）> 源码态旧目录 ``%USERPROFILE%\\DesktopBox``。
+    误选空目录）> 源码态旧目录 ``%USERPROFILE%\\DeskCountChen``。
     """
     if explicit:
         return Path(explicit)
-    env = os.environ.get("DESKTOPBOX_HOME", "").strip()
+    env = os.environ.get("DESKCOUNTCHEN_HOME", "").strip()
     if env:
         return Path(env)
     if (FROZEN_DEFAULT_APP_DIR / ".config.json").is_file():
         return FROZEN_DEFAULT_APP_DIR
-    return HOME / "DesktopBox"
+    return HOME / "DeskCountChen"
 
 # 面板尺寸上限：app.config 的 clamp_int 里是字面量 4000 / 3000（不是具名常量），
 # 因此这里只能跟随复制；改 app.config 的上限时请同步改这里（下面有断言兜底：
@@ -160,11 +160,11 @@ def real_desktop() -> Path:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="DesktopBox v1.4 SAO 接入状态自检（只读）")
+    ap = argparse.ArgumentParser(description="DeskCountChen v1.4 SAO 接入状态自检（只读）")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     ap.add_argument("--app-dir", default=None,
-                    help="程序私有目录（默认按 DESKTOPBOX_HOME → E:\\desktopbox\\data "
-                         "→ %USERPROFILE%\\DesktopBox 顺序解析）")
+                    help="程序私有目录（默认按 DESKCOUNTCHEN_HOME → E:\\desktopbox\\data "
+                         "→ %USERPROFILE%\\DeskCountChen 顺序解析）")
     args = ap.parse_args()
     app_dir = resolve_app_dir(args.app_dir)
     config_path = app_dir / ".config.json"

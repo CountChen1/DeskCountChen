@@ -17,7 +17,7 @@ v1.2 架构变更（用户实测反馈："Win+D 图标消失没解决，那把�
 - "隐藏分类"= 删除桌面 .lnk（分类与面板仍可从托盘访问）。
 
 v1.4 架构变更（入口交给 SAO Utils 2 的 HUD 图标）：
-- 数据根可配置（``app.data_root``，默认 ``%USERPROFILE%\\DesktopBox``），
+- 数据根可配置（``app.data_root``，默认 ``%USERPROFILE%\\DeskCountChen``），
   本模块所有路径一律走 ``paths.DATA_ROOT``（程序目录 ``paths.APP_DIR`` 不漂移）；
 - 自动登记分类时跳过 ``app.category_exclude`` 里的目录名、点开头目录，
   以及"登记过但新数据根里不存在"的旧分类（标 visible=False，保留皮肤不删配置）；
@@ -35,7 +35,7 @@ from PySide6.QtCore import QObject, QPoint, QRect, QTimer
 from PySide6.QtGui import QCursor, QIcon
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox, QSystemTrayIcon
 
-from app import paths
+from app import brand, paths
 from app.config import AppConfig, CategoryConfig
 from app.desktop_shortcuts import DesktopShortcutManager
 from app.folder_model import Entry, FolderModel
@@ -113,7 +113,7 @@ class AppController(QObject):
         self._setup_tray()
         self._sync_shortcuts()
         self._schedule_save()
-        logger.info("DesktopBox 启动完成：%d 个分类", len(self.cfg.categories))
+        logger.info("%s 启动完成：%d 个分类", brand.PRODUCT_NAME, len(self.cfg.categories))
 
     def shutdown(self) -> None:
         """退出前清理（幂等）。桌面 .lnk 保留（下次启动继续用）。"""
@@ -126,7 +126,7 @@ class AppController(QObject):
                 self.tray.hide()
             self.cfg.save()
             window_ops.release_single_instance_mutex()
-            logger.info("DesktopBox 已退出")
+            logger.info("%s 已退出", brand.PRODUCT_NAME)
         except Exception as exc:  # noqa: BLE001
             logger.warning("shutdown 异常: %s", exc)
 
@@ -207,7 +207,7 @@ class AppController(QObject):
 
     def _setup_tray(self) -> None:
         self.tray = QSystemTrayIcon(QIcon(self.icon_cache.default_icon(TRAY_ICON_PX)), self)
-        self.tray.setToolTip("DesktopBox 桌面收纳")
+        self.tray.setToolTip(f"{brand.PRODUCT_NAME} {brand.TAGLINE}")
         self.tray.setContextMenu(self._build_tray_menu())
         self.tray.show()
 
@@ -232,6 +232,11 @@ class AppController(QObject):
             # 启动器目录可能还没被 sync 创建过（新装 / 刚切模式），先确保存在
             paths.ensure_base_dirs()
             window_ops.shell_open(paths.LAUNCHERS_DIR)
+        elif action == menus.TRAY_ACTION_ABOUT:
+            # 版本 / 构建指纹 / 版权：用户与转发者据此核对是否为官方版本
+            QMessageBox.about(
+                None, f"关于 {brand.PRODUCT_NAME}", brand.about_text()
+            )
         elif action == menus.TRAY_ACTION_EXIT:
             self.app.quit()
         elif cat_id:
@@ -245,7 +250,10 @@ class AppController(QObject):
         if not name:
             return
         if any(ch in name for ch in INVALID_FILENAME_CHARS):
-            QMessageBox.warning(None, "DesktopBox", "名称不能包含以下字符：" + INVALID_FILENAME_CHARS)
+            QMessageBox.warning(
+            None, brand.PRODUCT_NAME,
+            "名称不能包含以下字符：" + INVALID_FILENAME_CHARS,
+        )
             return
         # dir 冲突不报错、不覆盖：追加 -2/-3（label 保持用户输入）
         candidate = name

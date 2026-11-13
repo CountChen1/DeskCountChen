@@ -17,7 +17,7 @@ C. 托盘与分类管理：
 
 现场保护（2026-11-12 事故后重做）：整个 ``app.paths`` 命名空间在 main() 第一步就被
 重定向到临时沙箱（``tests/sandbox.py``），配置 / 分类目录 / ico / .lnk 全部落在沙箱；
-桌面另行指向临时目录（不碰真实桌面）。真实 ``%USERPROFILE%\\DesktopBox`` 只读一次
+桌面另行指向临时目录（不碰真实桌面）。真实 ``%USERPROFILE%\\DeskCountChen`` 只读一次
 取 sha256 指纹，结束时断言零改动。**不再使用"备份 + finally 还原"**（finally 不保证
 执行，崩溃/被杀会留下污染）。
 

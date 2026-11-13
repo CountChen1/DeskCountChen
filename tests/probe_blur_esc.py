@@ -8,7 +8,7 @@ B. Esc 关闭面板：面板打开时按 Esc → 面板关闭；
 
 现场保护（2026-11-12 事故后重做）：``app.paths`` 整个命名空间在 main() 里第一步
 就被重定向到临时沙箱（``tests/sandbox.py``），探针往分类目录里放的 ``zz_qa_item.lnk``、
-配置回写、图标落点全部在沙箱内；真实 ``%USERPROFILE%\\DesktopBox`` 只读一次取 sha256
+配置回写、图标落点全部在沙箱内；真实 ``%USERPROFILE%\\DeskCountChen`` 只读一次取 sha256
 指纹，结束时断言零改动。真实桌面同样不被写入（落点指向临时目录）。
 **不再使用"备份 + 无条件还原"**：finally 不保证执行。
 

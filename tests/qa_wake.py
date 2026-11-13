@@ -15,9 +15,9 @@
 7. 结束后无 python.exe / pythonw.exe 残留。
 
 现场保护（2026-11-12 事故后重做，子进程也要隔离）：
-子进程的 ``APP_DIR`` 由 ``%USERPROFILE%\\DesktopBox`` 推导，所以本脚本给子进程传一个
+子进程的 ``APP_DIR`` 由 ``%USERPROFILE%\\DeskCountChen`` 推导，所以本脚本给子进程传一个
 **沙箱化的 USERPROFILE**（临时目录）——配置 / 日志 / .icons / .launchers / 数据根全部
-落在沙箱里，真实 ``%USERPROFILE%\\DesktopBox`` 只读一次取 sha256 指纹。
+落在沙箱里，真实 ``%USERPROFILE%\\DeskCountChen`` 只读一次取 sha256 指纹。
 落点用默认的 ``launcher`` 模式（v1.4 默认），因此真实桌面不会被写入；真实桌面只做
 **只读**核对（前后 .lnk 集合一致）。
 **不再使用"备份 + 无条件还原"**：finally 不保证执行，进程被杀就留下污染。
@@ -48,7 +48,7 @@ TEMP_DIR = "QA唤醒 中文&测试"
 COMMON_DIR = "常用"
 
 # 以下三个路径在 main() 里随沙箱 USERPROFILE 一起确定（子进程看到的就是它们）
-APP_DIR: Path = Path(os.environ.get("USERPROFILE", "")) / "DesktopBox"
+APP_DIR: Path = Path(os.environ.get("USERPROFILE", "")) / "DeskCountChen"
 LOG_FILE: Path = APP_DIR / ".logs" / "app.log"
 CONFIG: Path = APP_DIR / ".config.json"
 LAUNCHERS: Path = APP_DIR / ".launchers"
@@ -172,7 +172,7 @@ def _seed_sandbox_profile(root: Path) -> Path:
     """
     global APP_DIR, LOG_FILE, CONFIG, LAUNCHERS
 
-    APP_DIR = root / "DesktopBox"
+    APP_DIR = root / "DeskCountChen"
     LOG_FILE = APP_DIR / ".logs" / "app.log"
     CONFIG = APP_DIR / ".config.json"
     LAUNCHERS = APP_DIR / ".launchers"

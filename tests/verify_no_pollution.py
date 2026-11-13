@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 PYEXE = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 E2E = PROJECT_ROOT / "tests" / "regression_e2e.py"
-CONFIG = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "DesktopBox" / ".config.json"
+CONFIG = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "DeskCountChen" / ".config.json"
 
 
 def sha256_of(path: Path) -> str:

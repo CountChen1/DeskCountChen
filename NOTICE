@@ -1,0 +1,27 @@
+Desk CountChen
+Copyright (c) 2026 CountChen
+
+This product is developed and maintained by CountChen.
+Project home: https://github.com/CountChen/DeskCountChen
+
+The names "Desk CountChen" and "CountChen", together with the application
+icon in assets/app.ico, identify this project. If you distribute a modified
+version, please keep this NOTICE file and the copyright notices intact, and
+do not present the modified version as the original.
+
+--------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------
+
+Qt for Python (PySide6) — https://www.qt.io/qt-for-python
+  License: LGPL-3.0 (see https://www.gnu.org/licenses/lgpl-3.0.html)
+  The Qt libraries are shipped as separate DLLs inside the "_internal"
+  directory of the distributed build. This keeps them dynamically linked and
+  replaceable, as required by the LGPL. If you redistribute this software,
+  you must also pass on the LGPL terms and the corresponding license text.
+
+Python — https://www.python.org
+  License: PSF License Agreement.
+
+This project's own source code is licensed under the Apache License 2.0;
+see the LICENSE file for the full text.

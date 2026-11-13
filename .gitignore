@@ -4,3 +4,10 @@ __pycache__/
 *.log
 build/
 dist/
+
+# 构建期生成的构建指纹（每次打包由 tools/build_dist.py 重写，不入库）
+app/build_info.py
+
+# 打包/测试副产物
+*.spec
+.pytest_cache/
